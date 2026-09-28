@@ -16,8 +16,6 @@
 #   --start_port        starting port (default: 9330)
 #   --pid_name          PID file prefix (default: test_pid)
 #   --num_tasks         number of sim tasks, taken in order from the task list (default: 50, max: 50)
-#   --task_offset       number of tasks to skip from the start of the task list (default: 0)
-#   --skip_task         task name to exclude from the selected range (repeatable via comma-separated names)
 #   --num_gpus          total GPUs (default: 1)
 #   --num_per_gpu       inference servers per GPU (default: 1)
 #   --use_length        chunk length (default: 50)
@@ -51,8 +49,6 @@ conda_sh="${CONDA_SH:-/path/to/miniconda3/etc/profile.d/conda.sh}"
 start_port=9330
 pid_name="test_pid"
 num_tasks=50
-task_offset=0
-skip_task=""
 num_gpus=1
 num_per_gpu=1
 use_length=50
@@ -76,8 +72,6 @@ while [[ $# -gt 0 ]]; do
         --start_port)        start_port="$2";        shift 2 ;;
         --pid_name)          pid_name="$2";          shift 2 ;;
         --num_tasks)         num_tasks="$2";         shift 2 ;;
-        --task_offset)       task_offset="$2";       shift 2 ;;
-        --skip_task)         skip_task="$2";         shift 2 ;;
         --num_gpus)          num_gpus="$2";          shift 2 ;;
         --num_per_gpu)       num_per_gpu="$2";       shift 2 ;;
         --use_length)        use_length="$2";        shift 2 ;;
@@ -105,8 +99,6 @@ while [[ $# -gt 0 ]]; do
             echo "  --start_port        starting port (default: 9330)"
             echo "  --pid_name          PID file prefix (default: test_pid)"
             echo "  --num_tasks         number of sim tasks (default: 50, max: 50)"
-            echo "  --task_offset       number of tasks to skip from the start (default: 0)"
-            echo "  --skip_task         task name to exclude from the selected range"
             echo "  --num_gpus          total GPUs (default: 1)"
             echo "  --num_per_gpu       inference servers per GPU (default: 1)"
             echo "  --use_length        chunk length (default: 50)"
@@ -225,25 +217,11 @@ fi
 task_list_all=("lift_pot" "hanging_mug" "stack_bowls_three" "scan_object" "handover_block" "click_bell" "put_object_cabinet" "open_microwave" "stack_blocks_three" "place_shoe" "adjust_bottle" "beat_block_hammer" "blocks_ranking_rgb" "blocks_ranking_size" "click_alarmclock" "dump_bin_bigbin" "grab_roller" "handover_mic" "move_can_pot" "move_pillbottle_pad" "move_playingcard_away" "place_cans_plasticbox" "place_container_plate" "place_dual_shoes" "place_empty_cup" "place_fan" "place_mouse_pad" "place_object_basket" "place_object_scale" "place_object_stand" "place_phone_stand" "move_stapler_pad" "open_laptop" "pick_diverse_bottles" "pick_dual_bottles" "place_a2b_left" "place_a2b_right" "place_bread_basket" "place_bread_skillet" "place_burger_fries" "place_can_basket" "press_stapler" "rotate_qrcode" "shake_bottle_horizontally" "shake_bottle" "stack_blocks_two" "stack_bowls_two" "stamp_seal" "turn_switch" "put_bottles_dustbin")
 
 # Build the sim task queue
-if [ "$task_offset" -lt 0 ] || [ $((task_offset + num_tasks)) -gt "${#task_list_all[@]}" ]; then
-    echo -e "\033[31mInvalid task range: offset=${task_offset}, count=${num_tasks}, total=${#task_list_all[@]}\033[0m"
-    exit 1
-fi
 task_queue=()
-for i in $(seq "$task_offset" $((task_offset + num_tasks - 1))); do
-    candidate_task="${task_list_all[$i]}"
-    if [ -n "$skip_task" ] && [[ ",${skip_task}," == *",${candidate_task},"* ]]; then
-        echo -e "\033[33mSkipping task: ${candidate_task}\033[0m"
-        continue
-    fi
-    task_queue+=("$candidate_task")
+for i in $(seq 0 $((num_tasks-1))); do
+    task_queue+=("${task_list_all[$i]}")
 done
-num_tasks=${#task_queue[@]}
-if [ "$num_tasks" -eq 0 ]; then
-    echo -e "\033[31mNo tasks remain after applying task offset/skip filters\033[0m"
-    exit 1
-fi
-echo -e "\033[36mTasks this run (${num_tasks}, skipped first ${task_offset}, excluded: ${skip_task:-none}): ${task_queue[*]}\033[0m"
+echo -e "\033[36mTasks this run (${num_tasks}): ${task_queue[*]}\033[0m"
 echo -e "\033[36mInference config: ${num_gpus} GPU x ${num_per_gpu} servers/GPU = ${num_slots} slots\033[0m"
 echo -e "\033[36mInference precision: use_bf16=${use_bf16}, use_fp32=${use_fp32}, use_compile=${use_compile}\033[0m"
 

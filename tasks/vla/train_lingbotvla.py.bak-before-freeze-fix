@@ -466,8 +466,7 @@ def main():
 
     fsdp_kwargs = {}
     if args.train.freeze_vit:
-        vision_tower = getattr(model, "visual", None) or model.model.qwenvl_with_expert.qwenvl.visual
-        vision_tower.requires_grad_(False)
+        model.visual.requires_grad_(False)
         if args.train.data_parallel_mode == "fsdp1":
             fsdp_kwargs["use_orig_params"] = True
 
