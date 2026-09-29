@@ -40,6 +40,7 @@ from lingbotvla.optim import build_lr_scheduler, build_muon_optimizer, build_opt
 from lingbotvla.optim import build_flex_shard_dist_muon_optimizer
 from lingbotvla.utils import helper
 from lingbotvla.utils.async_hf_checkpoint import AsyncHFCheckpointSaver
+from lingbotvla.utils.checkpoint_retention import prune_old_checkpoints
 from lingbotvla.utils.training_metrics import AsyncTrainingMetricsWriter, build_visualization_run_dir
 from lingbotvla.utils.arguments import EvalArguments, DataArguments, ModelArguments, TrainingArguments, parse_args, save_args
 from lingbotvla.utils.dist_utils import all_reduce
@@ -770,6 +771,29 @@ def main():
             epoch_step=epoch_step,
         )
 
+    def prune_old_checkpoints_and_sync() -> None:
+        """Keep only the configured newest checkpoints after a completed save."""
+        max_to_keep = args.train.max_checkpoints_to_keep
+        if max_to_keep <= 0:
+            return
+        dist.barrier()
+        if args.train.global_rank == 0:
+            try:
+                removed = prune_old_checkpoints(
+                    args.train.save_checkpoint_path,
+                    max_to_keep,
+                    protected_paths=hf_saver.active_checkpoint_paths(),
+                )
+                for checkpoint_path in removed:
+                    logger.info_rank0(
+                        f"Checkpoint retention removed old snapshot: {checkpoint_path}"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    f"Checkpoint retention failed; keeping existing checkpoints: {exc}"
+                )
+        dist.barrier()
+
     environ_meter = helper.EnvironMeter(
         config=model_config,
         global_batch_size=args.train.global_batch_size,
@@ -1315,6 +1339,7 @@ def main():
                     current_epoch_for_eval,
                     current_epoch_step_for_eval,
                 )
+                prune_old_checkpoints_and_sync()
 
             if args.train.max_steps is not None and global_step >= args.train.max_steps:
                 logger.info_rank0(f"Reached max_steps={args.train.max_steps}, stopping training.")
@@ -1355,6 +1380,7 @@ def main():
                     current_epoch_for_eval,
                     current_epoch_step_for_eval,
                 )
+                prune_old_checkpoints_and_sync()
             break
         if args.train.save_epochs and (epoch + 1) % args.train.save_epochs == 0:
             helper.empty_cache()
@@ -1382,6 +1408,7 @@ def main():
                 current_epoch_for_eval,
                 current_epoch_step_for_eval,
             )
+            prune_old_checkpoints_and_sync()
 
     if max_steps_driven:
         data_loader_tqdm.close()
@@ -1406,6 +1433,7 @@ def main():
             current_epoch_step_for_eval,
         )
     hf_saver.wait_all_across_ranks()
+    prune_old_checkpoints_and_sync()
 
     dist.barrier()
     dist.destroy_process_group()

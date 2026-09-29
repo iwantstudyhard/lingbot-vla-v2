@@ -176,6 +176,17 @@ class AsyncHFCheckpointSaver:
             "failures": [asdict(item) for item in self._results if item.error],
         }
 
+    def active_checkpoint_paths(self) -> set[str]:
+        """Return checkpoint directories still used by background HF saves."""
+        if not _is_rank0():
+            return set()
+        self._drain_finished(block=False)
+        return {
+            os.path.abspath(path)
+            for path, future in self._futures
+            if not future.done()
+        }
+
     def _pending_count(self) -> int:
         return sum(1 for _, future in self._futures if not future.done())
 

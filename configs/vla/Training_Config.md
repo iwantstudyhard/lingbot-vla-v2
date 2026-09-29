@@ -403,6 +403,7 @@ If you also set `global_batch_size` explicitly, it must be consistent with the c
 | `attention_implementation` | str | `"flex"` | VLA attention implementation. Supported values include `"flex"`, `"flex_cached"`, and `"eager"`. |
 | `use_compile` | bool | `false` | Enable `torch.compile` for training acceleration. |
 | `ckpt_manager` | str | `"dcp"` | Checkpoint backend. Options: `"dcp"` (PyTorch Distributed Checkpoint), `"bytecheckpoint"`. |
+| `max_checkpoints_to_keep` | int | `0` | Maximum number of completed `global_step_*` checkpoints to retain. `0` disables cleanup. Older model checkpoints are removed only after a newer save; repository-side visualization snapshots are retained. |
 | `enable_fp32` | bool | `false` | Use float32 precision for the action expert. |
 | `enable_resume` | bool | `false` | Automatically resume training from the latest checkpoint in `output_dir`. |
 

@@ -491,6 +491,12 @@ class TrainingArguments:
         default=1,
         metadata={"help": "Number of epochs between two checkpoint saves."},
     )
+    max_checkpoints_to_keep: int = field(
+        default=0,
+        metadata={
+            "help": "Maximum completed step checkpoints to retain. 0 disables rolling cleanup."
+        },
+    )
     save_hf_weights: bool = field(
         default=True,
         metadata={"help": "Save the huggingface format weights to the last checkpoint dir."},
@@ -554,6 +560,8 @@ class TrainingArguments:
 
     def __post_init__(self):
         self._train_steps = -1
+        if self.max_checkpoints_to_keep < 0:
+            raise ValueError("max_checkpoints_to_keep must be non-negative.")
         if self.optimizer == "dist_muon":
             if self.data_parallel_mode != "fsdp2":
                 raise ValueError("optimizer='dist_muon' requires data_parallel_mode='fsdp2'.")
