@@ -21,10 +21,6 @@ import pdb
 
 from generate_episode_instructions import *
 
-current_file_path = os.path.abspath(__file__)
-parent_directory = os.path.dirname(current_file_path)
-
-
 def class_decorator(task_name):
     envs_module = importlib.import_module(f"envs.{task_name}")
     try:
@@ -43,11 +39,11 @@ def eval_function_decorator(policy_name, model_name):
         raise e
 
 def get_camera_config(camera_type):
-    camera_config_path = os.path.join(parent_directory, "../task_config/_camera_config.yml")
+    camera_config_path = Path(CONFIGS_PATH) / "_camera_config.yml"
 
-    assert os.path.isfile(camera_config_path), "task config file is missing"
+    assert camera_config_path.is_file(), f"task config file is missing: {camera_config_path}"
 
-    with open(camera_config_path, "r", encoding="utf-8") as f:
+    with camera_config_path.open("r", encoding="utf-8") as f:
         args = yaml.load(f.read(), Loader=yaml.FullLoader)
 
     assert camera_type in args, f"camera {camera_type} is not defined"
@@ -74,9 +70,8 @@ def main(usr_args):
     video_size = None
     video_fps = str(usr_args.get("video_fps", 10))
 
-    get_model = eval_function_decorator(policy_name, "get_model")
-
-    with open(f"./task_config/{task_config}.yml", "r", encoding="utf-8") as f:
+    task_config_path = Path(CONFIGS_PATH) / f"{task_config}.yml"
+    with task_config_path.open("r", encoding="utf-8") as f:
         args = yaml.load(f.read(), Loader=yaml.FullLoader)
 
     args['task_name'] = task_name
@@ -84,9 +79,9 @@ def main(usr_args):
     args["ckpt_setting"] = ckpt_setting
 
     embodiment_type = args.get("embodiment")
-    embodiment_config_path = os.path.join(CONFIGS_PATH, "_embodiment_config.yml")
+    embodiment_config_path = Path(CONFIGS_PATH) / "_embodiment_config.yml"
 
-    with open(embodiment_config_path, "r", encoding="utf-8") as f:
+    with embodiment_config_path.open("r", encoding="utf-8") as f:
         _embodiment_types = yaml.load(f.read(), Loader=yaml.FullLoader)
 
     def get_embodiment_file(embodiment_type):
@@ -95,7 +90,7 @@ def main(usr_args):
             raise "No embodiment files"
         return robot_file
 
-    with open(CONFIGS_PATH + "_camera_config.yml", "r", encoding="utf-8") as f:
+    with (Path(CONFIGS_PATH) / "_camera_config.yml").open("r", encoding="utf-8") as f:
         _camera_config = yaml.load(f.read(), Loader=yaml.FullLoader)
 
     head_camera_type = args["camera"]["head_camera_type"]
@@ -167,7 +162,9 @@ def main(usr_args):
 
     st_seed = 100000 * (1 + seed)
     suc_nums = []
-    test_num = 100
+    test_num = int(usr_args.get("num_episodes", 100))
+    if test_num < 1:
+        raise ValueError(f"num_episodes must be positive, got {test_num}")
     topk = 1
 
     # model = get_model(usr_args)
@@ -342,21 +339,26 @@ def eval_policy(task_name,
             ret = model.infer(formatted_observation) #(TASK_ENV, model, observation)
             action, latency = ret['action'], ret['server_timing']
             if len(action.shape) == 2:
-                initial_obs = False
-                for act in action:
-                    if initial_obs: # ensure the video is correct, but slow down simulation
-                        # observation = TASK_ENV.get_obs()
-                        pass
-                    else:
-                        initial_obs = True
+                for action_index, act in enumerate(action):
+                    # get_obs() also renders/writes the evaluation frame.  The
+                    # outer loop captured the frame for the first action; refresh
+                    # before every later action so a returned action chunk does
+                    # not become one frozen frame repeated in the output video.
+                    if action_index > 0 and TASK_ENV.eval_video_path is not None:
+                        TASK_ENV.get_obs()
                     TASK_ENV.take_action(act)
                     if TASK_ENV.eval_success:
                         succ = True
+                        # Preserve the reached success state as the final frame.
+                        if TASK_ENV.eval_video_path is not None:
+                            TASK_ENV.get_obs()
                         break
             else:
                 TASK_ENV.take_action(action)
                 if TASK_ENV.eval_success:
                     succ = True
+                    if TASK_ENV.eval_video_path is not None:
+                        TASK_ENV.get_obs()
             
             print(f"infer time {latency}")
 

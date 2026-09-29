@@ -554,15 +554,15 @@ def main():
     parser.add_argument(
         "--use_length",
         type=int,
-        default=50,
-        help="chunk length to use"
+        default=10,
+        help="number of predicted actions to execute before replanning (model horizon is 50)"
     )
 
     parser.add_argument(
         "--chunk_ret",
         type=str2bool,
         default=True,
-        help="chunk length to use"
+        help="return the selected action chunk in one response"
     )
 
     parser.add_argument(
