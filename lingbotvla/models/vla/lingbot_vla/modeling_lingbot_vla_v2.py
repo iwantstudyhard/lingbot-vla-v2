@@ -22,6 +22,7 @@ from .modeling_lingbot_vla import (
     replace_lnorm_with_adanorm,
     FlowMatching as FlowMatchingV1,
 )
+from .loss_utils import reduce_action_losses
 from .utils import (
     block_suffix_to_fv_,
     create_sinusoidal_pos_embedding,
@@ -1287,21 +1288,15 @@ class LingbotVlaV2Policy(PreTrainedModel):
             future_video_current_patch=future_video_current_patch,
         )
 
-        if joint_mask is not None:
-            if "repeat" in self.config.loss_type:
-                joint_mask = joint_mask.repeat(2, 1, 1)
-            assert len(joint_mask.shape) == 3
-            
-            masked_losses = losses * joint_mask
-            valid_counts = joint_mask.sum(dim=(1, 2)).clamp(min=1)
-            batch_mean_losses = masked_losses.sum(dim=(1, 2)) / valid_counts
-            loss_vla = masked_losses.sum() / joint_mask.sum().clamp(min=1)
-        else:
-            losses = losses[:, :, : self.config.action_dim]
-            batch_mean_losses = losses.mean(dim=(1, 2))
-            loss_vla = losses.mean()
+        loss_vla, batch_mean_losses, action_mask_metrics = reduce_action_losses(
+            losses,
+            joint_mask=joint_mask,
+            action_is_pad=action_is_pad,
+            action_dim=self.config.action_dim,
+        )
 
         loss_dict["batch_mean_losses"] = batch_mean_losses.detach()
+        loss_dict.update(action_mask_metrics)
         total_loss = (
             loss_vla
             + loss_depth

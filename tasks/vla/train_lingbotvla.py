@@ -880,6 +880,7 @@ def main():
                 helper.print_example(example=micro_batches[0], rank=args.train.local_rank)
 
             total_loss, total_vla_loss, total_depth_loss, total_future_depth_loss, total_future_video_loss, total_seq_wise_loss, total_router_z_loss = 0, 0, 0, 0, 0, 0, 0
+            total_action_padding_ratio, total_action_valid_timestep_ratio = 0, 0
             depth_targets, depth_preds = None, None
             future_depth_targets, future_depth_preds = None, None
             future_video_targets, future_video_preds = None, None
@@ -968,6 +969,8 @@ def main():
                     future_video_loss = future_video_loss / len(micro_batches)
                     seq_wise_loss = seq_wise_loss / len(micro_batches)
                     router_z_loss = loss_log.get("router_z_loss", loss_log.get("moe_zloss/weighted", 0))
+                    action_padding_ratio = loss_log.get("action/padding_ratio", 0)
+                    action_valid_timestep_ratio = loss_log.get("action/valid_timestep_ratio", 1)
                     avg_lang_length = micro_batch['lang_masks'].sum(dim=-1).float().mean()
 
                 with model_bwd_context:
@@ -985,6 +988,14 @@ def main():
                     total_seq_wise_loss += seq_wise_loss.item()
                 if not (isinstance(router_z_loss, int) or isinstance(router_z_loss, float)):
                     total_router_z_loss += router_z_loss.item() / len(micro_batches)
+                total_action_padding_ratio += (
+                    action_padding_ratio.item() if torch.is_tensor(action_padding_ratio) else action_padding_ratio
+                ) / len(micro_batches)
+                total_action_valid_timestep_ratio += (
+                    action_valid_timestep_ratio.item()
+                    if torch.is_tensor(action_valid_timestep_ratio)
+                    else action_valid_timestep_ratio
+                ) / len(micro_batches)
                 del micro_batch
             # --- TEMP gate-gradient probe (GATE_GRAD_PROBE=1): dump router gate grad
             # magnitude vs routed-expert grad, plus per-expert symmetry, pre-clip. ---
@@ -1038,7 +1049,7 @@ def main():
                 grad_norm = grad_norm.full_tensor().item()
 
             # collect mean loss across data parallel group
-            total_loss, total_vla_loss, total_depth_loss, total_future_depth_loss, total_future_video_loss, total_seq_wise_loss, total_router_z_loss, avg_lang_length, grad_norm = all_reduce((total_loss, total_vla_loss, total_depth_loss, total_future_depth_loss, total_future_video_loss, total_seq_wise_loss, total_router_z_loss, avg_lang_length, grad_norm), group=get_parallel_state().fsdp_group)
+            total_loss, total_vla_loss, total_depth_loss, total_future_depth_loss, total_future_video_loss, total_seq_wise_loss, total_router_z_loss, avg_lang_length, grad_norm, total_action_padding_ratio, total_action_valid_timestep_ratio = all_reduce((total_loss, total_vla_loss, total_depth_loss, total_future_depth_loss, total_future_video_loss, total_seq_wise_loss, total_router_z_loss, avg_lang_length, grad_norm, total_action_padding_ratio, total_action_valid_timestep_ratio), group=get_parallel_state().fsdp_group)
             total_depth_loss = total_depth_loss / depth_loss_weight
             total_future_depth_loss = total_future_depth_loss / future_depth_loss_weight
             total_future_video_loss = total_future_video_loss / future_video_loss_weight
@@ -1068,6 +1079,8 @@ def main():
                 f"FutureVideo_Loss {total_future_video_loss:.4f}, "
                 f"SeqWise_Loss {total_seq_wise_loss:.4f}, "
                 f"RouterZ_Loss {total_router_z_loss:.4f}, "
+                f"ActionPad {total_action_padding_ratio:.4f}, "
+                f"ActionValid {total_action_valid_timestep_ratio:.4f}, "
                 f"{maxvio_str}"
                 f"{sigmoid_str}"
                 f"GradNorm {grad_norm:.4f}, "
@@ -1087,6 +1100,8 @@ def main():
                 writer.add_scalar("training/future_video_loss", total_future_video_loss, global_step)
                 writer.add_scalar("training/sequence_wise_loss", total_seq_wise_loss, global_step)
                 writer.add_scalar("training/router_z_loss", total_router_z_loss, global_step)
+                writer.add_scalar("training/action_padding_ratio", total_action_padding_ratio, global_step)
+                writer.add_scalar("training/action_valid_timestep_ratio", total_action_valid_timestep_ratio, global_step)
                 # MoE monitoring metrics.
                 #   moe_summary/*            -> every step (cheap cross-layer health glance)
                 #   moe_<metric>/layerXX     -> every moe_monitor_interval steps (per-layer, downsampled)
@@ -1125,6 +1140,8 @@ def main():
                                 "future_video_loss": _json_scalar(total_future_video_loss),
                                 "seq_wise_loss": _json_scalar(total_seq_wise_loss),
                                 "router_z_loss": _json_scalar(total_router_z_loss),
+                                "action_padding_ratio": _json_scalar(total_action_padding_ratio),
+                                "action_valid_timestep_ratio": _json_scalar(total_action_valid_timestep_ratio),
                                 "maxvio": _json_scalar(maxvio_val),
                                 "avg_sigmoid": _json_scalar(sigmoid_val),
                                 "grad_norm": _json_scalar(grad_norm),

@@ -30,6 +30,7 @@ FIGURE_DESCRIPTIONS = [
     ("06_moe_health.png", "MoE 路由健康"),
     ("07_loss_distribution_by_phase.png", "分阶段损失分布"),
     ("08_metric_correlation.png", "指标相关性"),
+    ("09_action_mask_health.png", "动作损失时序 mask 健康度"),
 ]
 
 
@@ -122,6 +123,9 @@ def render_figure_set(
     analysis.plot_moe_health(rows, output_dir / "06_moe_health.png", rolling_window, checkpoint_steps)
     analysis.plot_phase_distribution(rows, output_dir / "07_loss_distribution_by_phase.png")
     analysis.plot_correlation(rows, output_dir / "08_metric_correlation.png")
+    analysis.plot_action_mask_health(
+        rows, output_dir / "09_action_mask_health.png", rolling_window, checkpoint_steps
+    )
 
 
 def safe_timestamp(value: str) -> datetime | None:

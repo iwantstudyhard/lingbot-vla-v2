@@ -38,6 +38,8 @@ METRIC_MAP = {
     "FutureVideo_Loss": "future_video_loss",
     "SeqWise_Loss": "seq_wise_loss",
     "RouterZ_Loss": "router_z_loss",
+    "ActionPad": "action_padding_ratio",
+    "ActionValid": "action_valid_timestep_ratio",
     "MaxVio": "maxvio",
     "AvgSigmoid": "avg_sigmoid",
     "GradNorm": "grad_norm",
@@ -226,7 +228,17 @@ def finite_stats(arr: np.ndarray) -> dict[str, float | int | None]:
 def window_stats(rows: list[dict[str, Any]], start: int, end: int) -> dict[str, Any]:
     subset = [row for row in rows if start <= row["step"] <= end]
     result: dict[str, Any] = {"start_step": start, "end_step": end, "count": len(subset)}
-    for field in LOSS_FIELDS + ["grad_norm", "step_time_s", "depth_forward_time_s", "maxvio", "avg_sigmoid", "lr", "expert_lr"]:
+    for field in LOSS_FIELDS + [
+        "grad_norm",
+        "step_time_s",
+        "depth_forward_time_s",
+        "maxvio",
+        "avg_sigmoid",
+        "lr",
+        "expert_lr",
+        "action_padding_ratio",
+        "action_valid_timestep_ratio",
+    ]:
         stat = finite_stats(values(subset, field))
         result[f"{field}_mean"] = stat["mean"]
         result[f"{field}_p95"] = stat["p95"]
@@ -467,6 +479,45 @@ def plot_moe_health(rows: list[dict[str, Any]], path: Path, window: int, checkpo
     plt.close(fig)
 
 
+def plot_action_mask_health(
+    rows: list[dict[str, Any]], path: Path, window: int, checkpoint_steps: list[int]
+) -> None:
+    """Show how much of each action chunk contributes to the action loss."""
+    steps = values(rows, "step")
+    fig, ax = plt.subplots(figsize=(13, 6.5))
+    specs = [
+        ("action_valid_timestep_ratio", "Valid action timesteps", BLUE),
+        ("action_padding_ratio", "Padded action timesteps", ORANGE),
+    ]
+    for field, label, color in specs:
+        arr = values(rows, field)
+        ax.plot(steps, arr, color=color, linewidth=0.5, alpha=0.13)
+        ax.plot(
+            steps,
+            rolling_mean(arr, window),
+            color=color,
+            linewidth=2,
+            label=f"{label} ({window}-step mean)",
+        )
+    annotate_checkpoints(ax, checkpoint_steps)
+    ax.set_title("Action-loss Temporal Mask Health")
+    ax.set_xlabel("Optimizer step")
+    ax.set_ylabel("Fraction of action horizon")
+    ax.set_ylim(-0.02, 1.02)
+    ax.grid(True, axis="y")
+    ax.legend()
+    fig.text(
+        0.01,
+        0.01,
+        "Valid + padded should remain approximately 1. Padded timesteps are excluded from VLA loss.",
+        color=MUTED,
+        fontsize=8,
+    )
+    fig.tight_layout(rect=(0, 0.025, 1, 1))
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
 def plot_phase_distribution(rows: list[dict[str, Any]], path: Path) -> None:
     steps = values(rows, "step")
     max_step = int(np.nanmax(steps))
@@ -620,6 +671,9 @@ def create_snapshot(rows: list[dict[str, Any]], target_step: int, out_dir: Path,
     plot_moe_health(subset, out_dir / "06_moe_health.png", window, checkpoint_marker)
     plot_phase_distribution(subset, out_dir / "07_loss_distribution_by_phase.png")
     plot_correlation(subset, out_dir / "08_metric_correlation.png")
+    plot_action_mask_health(
+        subset, out_dir / "09_action_mask_health.png", window, checkpoint_marker
+    )
     summary = {
         "status": status,
         "requested_checkpoint_step": target_step,
@@ -699,6 +753,7 @@ def write_readme(
         "- `figures/05_optimization_health.png`：梯度范数、单步耗时、教师前向耗时。",
         "- `figures/06_moe_health.png`：MaxVio、路由 sigmoid、平衡损失与 z-loss。",
         "- `figures/07_loss_distribution_by_phase.png`：五个训练阶段的损失分布。",
+        "- `figures/09_action_mask_health.png`：动作 chunk 中有效步与 padding 步比例。",
         "- `figures/08_metric_correlation.png`：逐步指标相关性（仅描述相关，不代表因果）。",
         "",
         "## 数据与配置",
@@ -775,6 +830,12 @@ def main() -> int:
     plot_moe_health(rows, fig_dir / "06_moe_health.png", args.rolling_window, chart_checkpoints)
     plot_phase_distribution(rows, fig_dir / "07_loss_distribution_by_phase.png")
     plot_correlation(rows, fig_dir / "08_metric_correlation.png")
+    plot_action_mask_health(
+        rows,
+        fig_dir / "09_action_mask_health.png",
+        args.rolling_window,
+        chart_checkpoints,
+    )
 
     all_fields = CSV_FIELDS + ["weighted_depth", "weighted_future_depth", "weighted_future_video", "reconstructed_loss", "loss_residual"]
     save_csv(data_dir / "training_metrics.csv", rows, all_fields)
