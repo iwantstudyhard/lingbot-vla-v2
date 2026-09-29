@@ -342,21 +342,26 @@ def eval_policy(task_name,
             ret = model.infer(formatted_observation) #(TASK_ENV, model, observation)
             action, latency = ret['action'], ret['server_timing']
             if len(action.shape) == 2:
-                initial_obs = False
-                for act in action:
-                    if initial_obs: # ensure the video is correct, but slow down simulation
-                        # observation = TASK_ENV.get_obs()
-                        pass
-                    else:
-                        initial_obs = True
+                for action_index, act in enumerate(action):
+                    # get_obs() also renders/writes the evaluation frame.  The
+                    # outer loop captured the frame for the first action; refresh
+                    # before every later action so a returned action chunk does
+                    # not become one frozen frame repeated in the output video.
+                    if action_index > 0 and TASK_ENV.eval_video_path is not None:
+                        TASK_ENV.get_obs()
                     TASK_ENV.take_action(act)
                     if TASK_ENV.eval_success:
                         succ = True
+                        # Preserve the reached success state as the final frame.
+                        if TASK_ENV.eval_video_path is not None:
+                            TASK_ENV.get_obs()
                         break
             else:
                 TASK_ENV.take_action(action)
                 if TASK_ENV.eval_success:
                     succ = True
+                    if TASK_ENV.eval_video_path is not None:
+                        TASK_ENV.get_obs()
             
             print(f"infer time {latency}")
 

@@ -20,7 +20,7 @@
 #   --skip_task         task name to exclude from the selected range (repeatable via comma-separated names)
 #   --num_gpus          total GPUs (default: 1)
 #   --num_per_gpu       inference servers per GPU (default: 1)
-#   --use_length        chunk length (default: 50)
+#   --use_length        actions executed before replanning (default: 10; model horizon: 50)
 #   --robo_name         robot config name (default: robotwin)
 #   --video_fps         video recording fps (default: 10)
 #   --no_video          disable video recording to speed up simulation
@@ -55,7 +55,7 @@ task_offset=0
 skip_task=""
 num_gpus=1
 num_per_gpu=1
-use_length=50
+use_length=10
 use_bf16=False
 use_fp32=True
 use_compile=True
@@ -109,7 +109,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --skip_task         task name to exclude from the selected range"
             echo "  --num_gpus          total GPUs (default: 1)"
             echo "  --num_per_gpu       inference servers per GPU (default: 1)"
-            echo "  --use_length        chunk length (default: 50)"
+            echo "  --use_length        actions executed before replanning (default: 10; model horizon: 50)"
             echo "  --use_bf16          use bfloat16 inference (default: False)"
             echo "  --use_fp32          use float32 inference (default: True; release reproduction setting)"
             echo "  --use_compile       enable model compile (default: True)"
@@ -124,6 +124,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# The model predicts 50 actions.  Evaluation may consume a shorter prefix, but
+# zero, negative, or longer values are invalid for this chunk-return mode.
+if ! [[ "$use_length" =~ ^[0-9]+$ ]] || [ "$use_length" -lt 1 ] || [ "$use_length" -gt 50 ]; then
+    echo -e "\033[31mError: --use_length must be an integer in 1..50 (got '${use_length}').\033[0m"
+    exit 1
+fi
 
 # ===== Common environment =====
 # Cleanup: kill all child processes on exit / Ctrl-C / kill
@@ -246,6 +252,7 @@ fi
 echo -e "\033[36mTasks this run (${num_tasks}, skipped first ${task_offset}, excluded: ${skip_task:-none}): ${task_queue[*]}\033[0m"
 echo -e "\033[36mInference config: ${num_gpus} GPU x ${num_per_gpu} servers/GPU = ${num_slots} slots\033[0m"
 echo -e "\033[36mInference precision: use_bf16=${use_bf16}, use_fp32=${use_fp32}, use_compile=${use_compile}\033[0m"
+echo -e "\033[36mControl/video: replan every ${use_length} actions, video_fps=${video_fps}, video=${enable_video}\033[0m"
 
 # ===== Common variables =====
 batch_time=$(date +%Y%m%d_%H%M%S)
@@ -295,6 +302,7 @@ for slot in $(seq 0 $((num_slots-1))); do
     setsid bash -c "source ${conda_sh} && conda activate ${inference_env} && SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 python -m ${inference_module} \
         --model_path '${model_path}' \
         --use_length '${use_length}' \
+        --chunk_ret True \
         --use_bf16 "${use_bf16}" \
         --use_fp32 "${use_fp32}" \
         --use_compile "${use_compile}" \
@@ -332,28 +340,29 @@ cd "$eval_workdir" || { echo -e "\033[31mError: sim workdir ${eval_workdir} miss
 # must live at <RoboTwin>/script/ for _camera_config.yml to be found.
 eval_client_src="${inference_workdir}experiment/robotwin/eval_policy_client_lingbotvla.py"
 eval_client_dst="${eval_workdir}/script/eval_policy_client_lingbotvla.py"
-if [ ! -f "$eval_client_dst" ]; then
-    if [ ! -f "$eval_client_src" ]; then
-        echo -e "\033[31mError: eval client source not found: ${eval_client_src}\033[0m"
-        exit 1
-    fi
-    echo -e "\033[36mCopying eval client -> ${eval_client_dst}\033[0m"
+if [ ! -f "$eval_client_src" ]; then
+    echo -e "\033[31mError: eval client source not found: ${eval_client_src}\033[0m"
+    exit 1
+fi
+if [ ! -f "$eval_client_dst" ] || ! cmp -s "$eval_client_src" "$eval_client_dst"; then
+    echo -e "\033[36mSyncing eval client -> ${eval_client_dst}\033[0m"
     cp "$eval_client_src" "$eval_client_dst"
 fi
 
 # ===== Ensure the deploy client helpers are present under RoboTwin/script/deploy =====
 # The eval client does `from script.deploy.websocket_client_policy import WebsocketClientPolicy`,
-# which pulls in a sibling msgpack_numpy. Copy any that are missing from the inference repo.
+# which pulls in a sibling msgpack_numpy. Keep the RoboTwin-side copies in sync
+# with this inference checkout so an older helper cannot silently survive a pull.
 deploy_pkg_src="${inference_workdir}deploy"
 deploy_pkg_dst="${eval_workdir}/script/deploy"
 mkdir -p "$deploy_pkg_dst"
 for f in __init__.py websocket_client_policy.py msgpack_numpy.py; do
-    if [ ! -f "$deploy_pkg_dst/$f" ]; then
-        if [ ! -f "$deploy_pkg_src/$f" ]; then
-            echo -e "\033[31mError: deploy helper source not found: ${deploy_pkg_src}/${f}\033[0m"
-            exit 1
-        fi
-        echo -e "\033[36mCopying deploy helper -> ${deploy_pkg_dst}/${f}\033[0m"
+    if [ ! -f "$deploy_pkg_src/$f" ]; then
+        echo -e "\033[31mError: deploy helper source not found: ${deploy_pkg_src}/${f}\033[0m"
+        exit 1
+    fi
+    if [ ! -f "$deploy_pkg_dst/$f" ] || ! cmp -s "$deploy_pkg_src/$f" "$deploy_pkg_dst/$f"; then
+        echo -e "\033[36mSyncing deploy helper -> ${deploy_pkg_dst}/${f}\033[0m"
         cp "$deploy_pkg_src/$f" "$deploy_pkg_dst/$f"
     fi
 done
@@ -609,6 +618,8 @@ echo -e "\033[36mGenerating stats file: ${stats_file}\033[0m"
     echo "  Task Config: ${task_config}"
     echo "  Inference: ${num_gpus} GPU x ${num_per_gpu}/GPU = ${num_slots} slots"
     echo "  Precision: use_bf16=${use_bf16}, use_fp32=${use_fp32}, use_compile=${use_compile}"
+    echo "  Control: use_length=${use_length} (model action horizon=50), chunk_ret=True"
+    echo "  Video: enabled=${enable_video}, fps=${video_fps}, per-action refresh=True"
     echo "  Result: ${completed} done, ${skipped} skipped"
     echo "============================================"
     echo ""

@@ -189,12 +189,19 @@ the full run.
 | `--no_video` | disable per-episode video recording (faster, no videos saved) |
 | `--keep_inference` | leave inference servers resident after sim finishes |
 | `--start_port` | base port for inference servers (default 9330, slot *i* uses base + i) |
-| `--use_length` | action-chunk length forwarded to the policy (default 50) |
+| `--use_length` | actions executed before observing/replanning (default 10; model predicts a 50-action horizon) |
 | `--robo_name` | robot config name (default `robotwin`) |
 | `--task_config` | RoboTwin setting: `demo_clean` or `demo_randomized` |
 | `--use_bf16` / `--use_fp32` | inference precision; release reproduction uses `False` / `True` |
 | `--use_compile` | enable lazy `torch.compile` (default `True`; first request takes longer) |
 | `--inference_script` | inference-side module (default `deploy/lingbot_vla_v2_policy.py`) |
+
+The default executes 10 actions from each 50-action prediction and then replans
+from a fresh observation. The evaluation client still renders one frame per
+executed simulator action, so saved videos show continuous motion instead of one
+frame repeated for an entire action chunk. Set `--use_length 5` or `1` for a more
+reactive (but slower) closed loop; use `50` only when intentionally reproducing
+the original open-loop chunk setting.
 
 ### Monitor / stop
 
