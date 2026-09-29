@@ -16,6 +16,7 @@
 #   --start_port        starting port (default: 9330)
 #   --pid_name          PID file prefix (default: test_pid)
 #   --num_tasks         number of sim tasks, taken in order from the task list (default: 50, max: 50)
+#   --num_episodes      episodes evaluated per task (default: 100)
 #   --task_offset       number of tasks to skip from the start of the task list (default: 0)
 #   --skip_task         task name to exclude from the selected range (repeatable via comma-separated names)
 #   --num_gpus          total GPUs (default: 1)
@@ -52,6 +53,7 @@ conda_sh="${CONDA_SH:-/path/to/miniconda3/etc/profile.d/conda.sh}"
 start_port=9330
 pid_name="test_pid"
 num_tasks=50
+num_episodes=100
 task_offset=0
 skip_task=""
 num_gpus=1
@@ -78,6 +80,7 @@ while [[ $# -gt 0 ]]; do
         --start_port)        start_port="$2";        shift 2 ;;
         --pid_name)          pid_name="$2";          shift 2 ;;
         --num_tasks)         num_tasks="$2";         shift 2 ;;
+        --num_episodes)      num_episodes="$2";      shift 2 ;;
         --task_offset)       task_offset="$2";       shift 2 ;;
         --skip_task)         skip_task="$2";         shift 2 ;;
         --num_gpus)          num_gpus="$2";          shift 2 ;;
@@ -108,6 +111,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --start_port        starting port (default: 9330)"
             echo "  --pid_name          PID file prefix (default: test_pid)"
             echo "  --num_tasks         number of sim tasks (default: 50, max: 50)"
+            echo "  --num_episodes      episodes evaluated per task (default: 100)"
             echo "  --task_offset       number of tasks to skip from the start (default: 0)"
             echo "  --skip_task         task name to exclude from the selected range"
             echo "  --num_gpus          total GPUs (default: 1)"
@@ -136,6 +140,10 @@ if ! [[ "$use_length" =~ ^[0-9]+$ ]] || [ "$use_length" -lt 1 ] || [ "$use_lengt
 fi
 if ! [[ "$server_ready_timeout" =~ ^[0-9]+$ ]] || [ "$server_ready_timeout" -lt 1 ]; then
     echo -e "\033[31mError: --server_ready_timeout must be a positive integer (got '${server_ready_timeout}').\033[0m"
+    exit 1
+fi
+if ! [[ "$num_episodes" =~ ^[0-9]+$ ]] || [ "$num_episodes" -lt 1 ]; then
+    echo -e "\033[31mError: --num_episodes must be a positive integer (got '${num_episodes}').\033[0m"
     exit 1
 fi
 
@@ -267,6 +275,7 @@ echo -e "\033[36mTasks this run (${num_tasks}, skipped first ${task_offset}, exc
 echo -e "\033[36mInference config: ${num_gpus} GPU x ${num_per_gpu} servers/GPU = ${num_slots} slots\033[0m"
 echo -e "\033[36mInference precision: use_bf16=${use_bf16}, use_fp32=${use_fp32}, use_compile=${use_compile}\033[0m"
 echo -e "\033[36mControl/video: replan every ${use_length} actions, video_fps=${video_fps}, video=${enable_video}\033[0m"
+echo -e "\033[36mEvaluation length: ${num_episodes} episode(s) per task\033[0m"
 
 # ===== Common variables =====
 batch_time=$(date +%Y%m%d_%H%M%S)
@@ -502,6 +511,7 @@ launch_task() {
         --overrides \
         --task_name ${task_name} \
         --task_config ${task_config} \
+        --num_episodes ${num_episodes} \
         --train_config_name ${train_config_name} \
         --seed ${seed} \
         --policy_name ${policy_name} \
@@ -661,6 +671,7 @@ echo -e "\033[36mGenerating stats file: ${stats_file}\033[0m"
     echo "  Model: ${_exp_name}_${_step_k}"
     echo "  Model path: ${model_path}"
     echo "  Tasks: ${num_tasks}"
+    echo "  Episodes per task: ${num_episodes}"
     echo "  Task Config: ${task_config}"
     echo "  Inference: ${num_gpus} GPU x ${num_per_gpu}/GPU = ${num_slots} slots"
     echo "  Precision: use_bf16=${use_bf16}, use_fp32=${use_fp32}, use_compile=${use_compile}"
@@ -670,7 +681,7 @@ echo -e "\033[36mGenerating stats file: ${stats_file}\033[0m"
     echo "  Result: ${completed} done, ${skipped} skipped"
     echo "============================================"
     echo ""
-    printf "%-30s %-10s %-12s %-10s %-10s\n" "Task" "Time(s)" "Done(100)" "Success/Total" "Rate"
+    printf "%-30s %-10s %-14s %-14s %-10s\n" "Task" "Time(s)" "Done(${num_episodes})" "Success/Total" "Rate"
     echo "--------------------------------------------------------------------------------"
 
     total_success=0
@@ -701,21 +712,21 @@ echo -e "\033[36mGenerating stats file: ${stats_file}\033[0m"
             fi
         fi
 
-        # Check whether all 100 episodes ran
+        # Check whether the requested number of episodes ran.
         if [ "$episodes_done" != "-" ]; then
             total_ep=$(echo "$episodes_done" | cut -d'/' -f2)
-            if [ "$total_ep" = "100" ]; then
+            if [ "$total_ep" = "$num_episodes" ]; then
                 complete_mark="YES"
             else
-                complete_mark="NO(${total_ep}/100)"
+                complete_mark="NO(${total_ep}/${num_episodes})"
                 all_complete=false
             fi
         else
-            complete_mark="NO(0/100)"
+            complete_mark="NO(0/${num_episodes})"
             all_complete=false
         fi
 
-        printf "%-30s %-10s %-12s %-10s %-10s\n" "$task_name" "$duration" "$complete_mark" "$episodes_done" "$success_rate"
+        printf "%-30s %-10s %-14s %-14s %-10s\n" "$task_name" "$duration" "$complete_mark" "$episodes_done" "$success_rate"
     done
 
     echo "--------------------------------------------------------------------------------"
@@ -726,9 +737,9 @@ echo -e "\033[36mGenerating stats file: ${stats_file}\033[0m"
     fi
     printf "Summary: total %ds, success %d/%d, overall rate %s%%\n" "$total_duration" "$total_success" "$total_episodes" "$overall_rate"
     if $all_complete; then
-        echo "All tasks fully executed 100 episodes"
+        echo "All tasks fully executed ${num_episodes} episodes"
     else
-        echo "Warning: some tasks did not complete 100 episodes; check logs"
+        echo "Warning: some tasks did not complete ${num_episodes} episodes; check logs"
     fi
     echo "============================================"
 } | tee "$stats_file"

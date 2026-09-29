@@ -164,13 +164,12 @@ bash experiment/robotwin/start_robotwin_infer_and_eval.sh \
     --eval_workdir /path/to/RoboTwin \
     --conda_sh     /path/to/miniconda3/etc/profile.d/conda.sh \
     --task_config  demo_clean \
-    --num_tasks 1 --num_gpus 1 --num_per_gpu 1
+    --num_tasks 1 --num_episodes 1 --num_gpus 1 --num_per_gpu 1
 ```
 
 The run dir is printed at startup (`Run directory: ...`). You should see `Success rate: N/N =>
-...` lines appear in the task log. Each task evaluates **100 episodes**, so even a
-single-task smoke takes tens of minutes — kill it once you've seen successes, then launch
-the full run.
+...` lines appear in the task log. The smoke command runs one episode. Full evaluation
+defaults to **100 episodes per task** when `--num_episodes` is omitted.
 
 ### Output layout
 
@@ -189,6 +188,7 @@ the full run.
 | `--no_video` | disable per-episode video recording (faster, no videos saved) |
 | `--keep_inference` | leave inference servers resident after sim finishes |
 | `--start_port` | base port for inference servers (default 9330, slot *i* uses base + i) |
+| `--num_episodes` | episodes evaluated per task (default 100; use 1 for a smoke test) |
 | `--use_length` | actions executed before observing/replanning (default 10; model predicts a 50-action horizon) |
 | `--server_ready_timeout` | seconds to wait for every policy server's `/healthz` endpoint before starting simulation (default 1800) |
 | `--robo_name` | robot config name (default `robotwin`) |
