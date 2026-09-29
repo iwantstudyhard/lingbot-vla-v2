@@ -162,39 +162,71 @@ fi
 export NO_PROXY="${NO_PROXY:+${NO_PROXY},}127.0.0.1,localhost"
 export no_proxy="${no_proxy:+${no_proxy},}127.0.0.1,localhost"
 
-# Cleanup: kill all child processes on exit / Ctrl-C / kill
+# Cleanup: kill all child processes once.  Signal handlers must exit after
+# cleanup; otherwise the scheduler interprets terminated workers as retryable
+# failures and launches them again.
+cleanup_started=0
+
+terminate_process_group() {
+    local local_pid=$1
+    local signal_name=$2
+    local child_pgid=""
+    local self_pgid=""
+
+    [ "$local_pid" != "0" ] || return 0
+    kill -0 "$local_pid" 2>/dev/null || return 0
+    child_pgid=$(ps -o pgid= -p "$local_pid" 2>/dev/null | tr -d ' ')
+    self_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+    if [ -n "$child_pgid" ] && [ "$child_pgid" != "$self_pgid" ]; then
+        kill -"$signal_name" -- -"$child_pgid" 2>/dev/null || true
+    else
+        kill -"$signal_name" "$local_pid" 2>/dev/null || true
+    fi
+}
+
 cleanup() {
+    if [ "$cleanup_started" -eq 1 ]; then
+        return
+    fi
+    cleanup_started=1
+    # Ignore repeated Ctrl-C/TERM while the first cleanup is in progress.
+    trap '' INT TERM
+
     echo ""
     echo -e "\033[33m=== Cleaning up all child processes ===\033[0m"
     # Kill inference servers
-    for slot in $(seq 0 $((num_slots-1))); do
+    for slot in $(seq 0 $((${num_slots:-0}-1))); do
         local_pid=${inference_pids[$slot]:-0}
-        if [ "$local_pid" != "0" ] && kill -0 "$local_pid" 2>/dev/null; then
-            kill -TERM -- -"$(ps -o pgid= -p "$local_pid" 2>/dev/null | tr -d ' ')" 2>/dev/null \
-                || kill -TERM "$local_pid" 2>/dev/null || true
-        fi
+        terminate_process_group "$local_pid" TERM
     done
     # Kill eval workers
-    for slot in $(seq 0 $((num_slots-1))); do
+    for slot in $(seq 0 $((${num_slots:-0}-1))); do
         local_pid=${slot_pid[$slot]:-0}
-        if [ "$local_pid" != "0" ] && kill -0 "$local_pid" 2>/dev/null; then
-            kill -TERM -- -"$(ps -o pgid= -p "$local_pid" 2>/dev/null | tr -d ' ')" 2>/dev/null \
-                || kill -TERM "$local_pid" 2>/dev/null || true
-        fi
+        terminate_process_group "$local_pid" TERM
     done
     sleep 1
     # Force kill survivors
-    for slot in $(seq 0 $((num_slots-1))); do
+    for slot in $(seq 0 $((${num_slots:-0}-1))); do
         for local_pid in ${inference_pids[$slot]:-0} ${slot_pid[$slot]:-0}; do
-            if [ "$local_pid" != "0" ] && kill -0 "$local_pid" 2>/dev/null; then
-                kill -KILL -- -"$(ps -o pgid= -p "$local_pid" 2>/dev/null | tr -d ' ')" 2>/dev/null \
-                    || kill -KILL "$local_pid" 2>/dev/null || true
-            fi
+            terminate_process_group "$local_pid" KILL
         done
     done
     echo -e "\033[33m=== Cleanup done ===\033[0m"
 }
-trap cleanup EXIT INT TERM
+
+handle_interrupt() {
+    cleanup
+    exit 130
+}
+
+handle_terminate() {
+    cleanup
+    exit 143
+}
+
+trap cleanup EXIT
+trap handle_interrupt INT
+trap handle_terminate TERM
 
 
 
