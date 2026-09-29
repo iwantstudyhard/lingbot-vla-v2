@@ -21,6 +21,7 @@
 #   --num_gpus          total GPUs (default: 1)
 #   --num_per_gpu       inference servers per GPU (default: 1)
 #   --use_length        actions executed before replanning (default: 10; model horizon: 50)
+#   --server_ready_timeout seconds to wait for policy servers to become healthy (default: 1800)
 #   --robo_name         robot config name (default: robotwin)
 #   --video_fps         video recording fps (default: 10)
 #   --no_video          disable video recording to speed up simulation
@@ -56,6 +57,7 @@ skip_task=""
 num_gpus=1
 num_per_gpu=1
 use_length=10
+server_ready_timeout=1800
 use_bf16=False
 use_fp32=True
 use_compile=True
@@ -81,6 +83,7 @@ while [[ $# -gt 0 ]]; do
         --num_gpus)          num_gpus="$2";          shift 2 ;;
         --num_per_gpu)       num_per_gpu="$2";       shift 2 ;;
         --use_length)        use_length="$2";        shift 2 ;;
+        --server_ready_timeout) server_ready_timeout="$2"; shift 2 ;;
         --use_bf16)          use_bf16="$2";        shift 2 ;;
         --use_fp32)          use_fp32="$2";        shift 2 ;;
         --use_compile)       use_compile="$2";     shift 2 ;;
@@ -110,6 +113,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --num_gpus          total GPUs (default: 1)"
             echo "  --num_per_gpu       inference servers per GPU (default: 1)"
             echo "  --use_length        actions executed before replanning (default: 10; model horizon: 50)"
+            echo "  --server_ready_timeout seconds to wait for policy servers (default: 1800)"
             echo "  --use_bf16          use bfloat16 inference (default: False)"
             echo "  --use_fp32          use float32 inference (default: True; release reproduction setting)"
             echo "  --use_compile       enable model compile (default: True)"
@@ -130,8 +134,18 @@ if ! [[ "$use_length" =~ ^[0-9]+$ ]] || [ "$use_length" -lt 1 ] || [ "$use_lengt
     echo -e "\033[31mError: --use_length must be an integer in 1..50 (got '${use_length}').\033[0m"
     exit 1
 fi
+if ! [[ "$server_ready_timeout" =~ ^[0-9]+$ ]] || [ "$server_ready_timeout" -lt 1 ]; then
+    echo -e "\033[31mError: --server_ready_timeout must be a positive integer (got '${server_ready_timeout}').\033[0m"
+    exit 1
+fi
 
 # ===== Common environment =====
+# Policy servers are local.  Bypass HTTP(S) proxies explicitly; otherwise some
+# WebSocket versions may send ws://0.0.0.0/localhost handshakes to a configured
+# proxy and report a misleading "invalid HTTP response" while the model loads.
+export NO_PROXY="${NO_PROXY:+${NO_PROXY},}127.0.0.1,localhost"
+export no_proxy="${no_proxy:+${no_proxy},}127.0.0.1,localhost"
+
 # Cleanup: kill all child processes on exit / Ctrl-C / kill
 cleanup() {
     echo ""
@@ -327,6 +341,38 @@ for slot in $(seq 0 $((num_slots-1))); do
     fi
 done
 active_inference=$num_slots
+
+# Do not launch simulators while the policy is still loading.  Large checkpoints
+# can take minutes to initialize; an open TCP connection alone is insufficient,
+# so wait for the WebSocket server's HTTP health endpoint.
+if ! command -v curl >/dev/null 2>&1; then
+    echo -e "\033[31mError: curl is required for inference server health checks.\033[0m"
+    exit 1
+fi
+for slot in $(seq 0 $((num_slots-1))); do
+    port=$(( start_port + slot ))
+    local_pid=${inference_pids[$slot]}
+    log_file="${run_dir}/inference_logs/qwenpi_slot${slot}_gpu$((slot % num_gpus))_port${port}.log"
+    deadline=$(( $(date +%s) + server_ready_timeout ))
+    echo -e "\033[36m[inf slot $slot] Waiting for http://127.0.0.1:${port}/healthz (timeout ${server_ready_timeout}s)...\033[0m"
+    while true; do
+        if ! kill -0 "$local_pid" 2>/dev/null; then
+            echo -e "\033[31mError: inference server slot ${slot} exited before becoming ready.\033[0m"
+            tail -n 100 "$log_file" 2>/dev/null || true
+            exit 1
+        fi
+        if curl --noproxy '*' --silent --fail --max-time 2 "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1; then
+            echo -e "\033[32m[inf slot $slot] Policy server is ready.\033[0m"
+            break
+        fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo -e "\033[31mError: inference server slot ${slot} was not ready within ${server_ready_timeout}s.\033[0m"
+            tail -n 100 "$log_file" 2>/dev/null || true
+            exit 1
+        fi
+        sleep 5
+    done
+done
 
 # ============================================================
 # Phase 2: queue-scheduled sim tasks
@@ -619,6 +665,7 @@ echo -e "\033[36mGenerating stats file: ${stats_file}\033[0m"
     echo "  Inference: ${num_gpus} GPU x ${num_per_gpu}/GPU = ${num_slots} slots"
     echo "  Precision: use_bf16=${use_bf16}, use_fp32=${use_fp32}, use_compile=${use_compile}"
     echo "  Control: use_length=${use_length} (model action horizon=50), chunk_ret=True"
+    echo "  Server readiness timeout: ${server_ready_timeout}s"
     echo "  Video: enabled=${enable_video}, fps=${video_fps}, per-action refresh=True"
     echo "  Result: ${completed} done, ${skipped} skipped"
     echo "============================================"

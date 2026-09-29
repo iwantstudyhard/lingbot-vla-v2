@@ -5,6 +5,7 @@ from typing import Dict, Optional, Tuple
 
 from typing_extensions import override
 import websockets.sync.client
+from websockets.exceptions import WebSocketException
 from .msgpack_numpy import Packer, unpackb
 
 
@@ -14,7 +15,7 @@ class WebsocketClientPolicy:
     See WebsocketPolicyServer for a corresponding server implementation.
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: Optional[int] = None, api_key: Optional[str] = None) -> None:
+    def __init__(self, host: str = "127.0.0.1", port: Optional[int] = None, api_key: Optional[str] = None) -> None:
         self._uri = f"ws://{host}"
         if port is not None:
             self._uri += f":{port}"
@@ -37,13 +38,22 @@ class WebsocketClientPolicy:
                     compression=None,
                     max_size=None,
                     additional_headers=headers,
+                    open_timeout=5,
                     ping_interval=ping_interval,
                     ping_timeout=ping_timeout,
                 )
                 metadata = unpackb(conn.recv())
                 return conn, metadata
-            except ConnectionRefusedError:
-                logging.info("Still waiting for server...")
+            except (OSError, EOFError, WebSocketException) as exc:
+                # While a large policy is loading, a port may briefly accept a
+                # connection and close it before completing the WebSocket HTTP
+                # handshake. Treat that like connection-refused and keep waiting.
+                logging.info(
+                    "Still waiting for server at %s (%s: %s)...",
+                    self._uri,
+                    type(exc).__name__,
+                    exc,
+                )
                 time.sleep(5)
 
     @override

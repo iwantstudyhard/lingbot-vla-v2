@@ -190,6 +190,7 @@ the full run.
 | `--keep_inference` | leave inference servers resident after sim finishes |
 | `--start_port` | base port for inference servers (default 9330, slot *i* uses base + i) |
 | `--use_length` | actions executed before observing/replanning (default 10; model predicts a 50-action horizon) |
+| `--server_ready_timeout` | seconds to wait for every policy server's `/healthz` endpoint before starting simulation (default 1800) |
 | `--robo_name` | robot config name (default `robotwin`) |
 | `--task_config` | RoboTwin setting: `demo_clean` or `demo_randomized` |
 | `--use_bf16` / `--use_fp32` | inference precision; release reproduction uses `False` / `True` |
