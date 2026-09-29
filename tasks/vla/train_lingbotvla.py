@@ -345,6 +345,14 @@ class MyDataArguments(DataArguments):
         default=None,
         metadata={"help": "Path to the normalization stats file."},
     )
+    expected_num_frames: Optional[int] = field(
+        default=None,
+        metadata={"help": "Fail at startup unless the training dataset has exactly this many frames."},
+    )
+    require_norm_stats_count_match: bool = field(
+        default=False,
+        metadata={"help": "Require norm_stats_file.count to equal the training dataset length."},
+    )
     prompt_type: Literal["global", "subtask"] = field(
         default="global",
         metadata={"help": "Type of the prompt."},
@@ -490,6 +498,38 @@ def main():
         if args.data.datasets_type == 'vla':
             args.data.chunk_size = args.train.chunk_size
             train_dataset = build_vla_dataset(dataset_config=args.data, model_config=args.model, config=model.config, processor=processor, use_depth_align=use_depth_align)
+            actual_num_frames = len(train_dataset)
+            if (
+                args.data.expected_num_frames is not None
+                and actual_num_frames != args.data.expected_num_frames
+            ):
+                raise RuntimeError(
+                    "Training dataset frame-count mismatch: "
+                    f"expected {args.data.expected_num_frames}, got {actual_num_frames}. "
+                    f"Refusing to train from {args.data.train_path}."
+                )
+            norm_stats_count = None
+            if args.data.require_norm_stats_count_match:
+                if not args.data.norm_stats_file:
+                    raise RuntimeError(
+                        "require_norm_stats_count_match=True requires data.norm_stats_file."
+                    )
+                norm_stats_path = Path(args.data.norm_stats_file).expanduser()
+                if not norm_stats_path.is_absolute():
+                    norm_stats_path = repo_root / norm_stats_path
+                with norm_stats_path.open("r", encoding="utf-8") as handle:
+                    norm_stats_count = json.load(handle).get("count")
+                if norm_stats_count != actual_num_frames:
+                    raise RuntimeError(
+                        "Normalization statistics do not match the training dataset: "
+                        f"stats count={norm_stats_count}, dataset frames={actual_num_frames}, "
+                        f"stats={norm_stats_path}."
+                    )
+            logger.info_rank0(
+                "Training data contract verified: "
+                f"manifest={args.data.train_path}, frames={actual_num_frames}, "
+                f"norm_stats={args.data.norm_stats_file}, stats_count={norm_stats_count}"
+            )
             args.train.compute_train_steps(args.data.max_seq_len, args.data.train_size, len(train_dataset))
         
         train_dataloader = build_dataloader(
@@ -520,6 +560,33 @@ def main():
         vision_tower.requires_grad_(False)
         if args.train.data_parallel_mode == "fsdp1":
             fsdp_kwargs["use_orig_params"] = True
+
+    vision_tower = getattr(model, "visual", None) or model.model.qwenvl_with_expert.qwenvl.visual
+    vision_total_params = sum(parameter.numel() for parameter in vision_tower.parameters())
+    vision_trainable_params = sum(
+        parameter.numel() for parameter in vision_tower.parameters() if parameter.requires_grad
+    )
+    vision_should_train = not (
+        args.train.freeze_vision_encoder
+        or args.train.freeze_vit
+        or args.train.train_expert_only
+    )
+    if vision_should_train and vision_trainable_params == 0:
+        raise RuntimeError(
+            "Vision encoder was requested to train, but it has zero trainable parameters."
+        )
+    if not vision_should_train and vision_trainable_params != 0:
+        raise RuntimeError(
+            "Vision encoder was requested to be frozen, but it still has trainable parameters."
+        )
+    logger.info_rank0(
+        "Vision training contract verified: "
+        f"trainable={vision_should_train}, "
+        f"trainable_params={vision_trainable_params}/{vision_total_params}, "
+        f"freeze_vision_encoder={args.train.freeze_vision_encoder}, "
+        f"freeze_vit={args.train.freeze_vit}, "
+        f"train_expert_only={args.train.train_expert_only}"
+    )
 
     model = build_parallelize_model(
         model,

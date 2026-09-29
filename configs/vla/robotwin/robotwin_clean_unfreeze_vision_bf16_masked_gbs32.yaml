@@ -26,6 +26,10 @@ data:
   num_workers: 4
   use_future_image: true
   norm_stats_file: assets/norm_stats/robotwin_clean_only.json
+  # The consolidated clean-50 dataset and its normalization statistics both
+  # contain exactly 548,893 frames. Abort before step 1 if either changes.
+  expected_num_frames: 548893
+  require_norm_stats_count_match: true
 
 train:
   # Keep this separate from the old 20k run. enable_resume must never pick up
