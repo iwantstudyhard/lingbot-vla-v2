@@ -74,8 +74,6 @@ def main(usr_args):
     video_size = None
     video_fps = str(usr_args.get("video_fps", 10))
 
-    get_model = eval_function_decorator(policy_name, "get_model")
-
     with open(f"./task_config/{task_config}.yml", "r", encoding="utf-8") as f:
         args = yaml.load(f.read(), Loader=yaml.FullLoader)
 
