@@ -28,7 +28,7 @@ data:
   norm_stats_file: assets/norm_stats/robotwin_clean_only.json
 
 train:
-  output_dir: /scratch/YF_Data/lingbot_workspace/train_outputs/robotwin_clean_freeze_vision_bf16
+  output_dir: /scratch/YF_Data/lingbot_workspace/train_outputs/robotwin_clean_freeze_vision_bf16_trial
   moe_monitor_interval: 1000
   enable_gradient_checkpointing: true # Set to true if GPU memory is insufficient, but this will slow down training.
   precompute_grid_thw: true
@@ -73,13 +73,14 @@ train:
   global_batch_size: 4
   max_steps: 50000
   ckpt_manager: dcp
-  save_steps: 20000
+  save_steps: 10000
   save_epochs: 29000
   enable_training_visualization: true
+  training_visualization_output_dir: train_outputs/robotwin_clean_freeze_vision_bf16_trial
   training_visualization_flush_steps: 100
   training_visualization_rolling_window: 200
   enable_fp32: false
-  enable_resume: true
+  enable_resume: false
   align_params:
     mode: 'query'
     num_task_tokens: 8

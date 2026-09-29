@@ -1,10 +1,16 @@
+from __future__ import annotations
+
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from functools import partial
 from io import BytesIO
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Literal
 from collections import defaultdict
 import numpy as np
@@ -34,6 +40,7 @@ from lingbotvla.optim import build_lr_scheduler, build_muon_optimizer, build_opt
 from lingbotvla.optim import build_flex_shard_dist_muon_optimizer
 from lingbotvla.utils import helper
 from lingbotvla.utils.async_hf_checkpoint import AsyncHFCheckpointSaver
+from lingbotvla.utils.training_metrics import AsyncTrainingMetricsWriter, build_visualization_run_dir
 from lingbotvla.utils.arguments import EvalArguments, DataArguments, ModelArguments, TrainingArguments, parse_args, save_args
 from lingbotvla.utils.dist_utils import all_reduce
 from lingbotvla.models.config_registry import get_config_registry
@@ -118,6 +125,32 @@ def get_moe_param_groups(model: "torch.nn.Module", args_train) -> Optional[List[
 
 @dataclass
 class MyTrainingArguments(TrainingArguments):
+    enable_training_visualization: bool = field(
+        default=True,
+        metadata={"help": "Write structured metrics and render plots after every checkpoint."},
+    )
+    training_visualization_output_dir: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Base directory for visualization runs. A unique runs/<run-id> directory is "
+                "created below it. By default the base is "
+                "<repository>/train_outputs/<output_dir basename>."
+            )
+        },
+    )
+    training_visualization_flush_steps: int = field(
+        default=100,
+        metadata={"help": "Number of metric records batched between background JSONL flushes."},
+    )
+    training_visualization_rolling_window: int = field(
+        default=200,
+        metadata={"help": "Rolling window used by automatically generated training plots."},
+    )
+    training_visualization_timeout_seconds: int = field(
+        default=600,
+        metadata={"help": "Maximum time allowed for checkpoint visualization rendering."},
+    )
     freeze_vit: bool = field(
         default=False,
         metadata={"help": "Whether or not to freeze the vit parameters."},
@@ -332,6 +365,13 @@ class Arguments:
 
 def main():
     args = parse_args(Arguments)
+    repo_root = Path(__file__).resolve().parents[2]
+    visualization_run_dir = build_visualization_run_dir(
+        repo_root,
+        args.train.output_dir,
+        base_dir_override=args.train.training_visualization_output_dir,
+        run_id=os.environ.get("LINGBOT_TRAIN_RUN_ID"),
+    )
     logger.info(f"Process rank: {args.train.global_rank}, world size: {args.train.world_size}")
     logger.info_rank0(json.dumps(asdict(args), indent=2))
     torch.cuda.set_device(f"cuda:{args.train.local_rank}")
@@ -342,6 +382,15 @@ def main():
 
     if args.train.global_rank == 0:
         save_args(args, args.train.output_dir)
+        if args.train.enable_training_visualization:
+            try:
+                visualization_run_dir.mkdir(parents=True, exist_ok=False)
+            except FileExistsError as exc:
+                raise RuntimeError(
+                    f"Refusing to reuse an existing visualization run directory: {visualization_run_dir}. "
+                    "Unset or change LINGBOT_TRAIN_RUN_ID before restarting."
+                ) from exc
+            save_args(args, str(visualization_run_dir))
 
     Checkpointer = build_checkpointer(dist_backend=args.train.data_parallel_mode, ckpt_manager=args.train.ckpt_manager)
 
@@ -567,9 +616,21 @@ def main():
         lr_start=args.train.lr_start,
     )
 
+    training_metrics_writer: AsyncTrainingMetricsWriter | None = None
+    live_metrics_path: Path | None = None
     if args.train.global_rank == 0:
         log_dir=f"{args.train.output_dir}/runs/"
         writer = AsyncTBWriter(log_dir=log_dir)
+        if args.train.enable_training_visualization:
+            live_metrics_path = visualization_run_dir / "analysis" / "data" / "training_metrics_live.jsonl"
+            training_metrics_writer = AsyncTrainingMetricsWriter(
+                live_metrics_path,
+                flush_every=args.train.training_visualization_flush_steps,
+            )
+            logger.info_rank0(
+                f"Automatic training metrics enabled: {live_metrics_path} "
+                f"(checkpoint visualizations under {visualization_run_dir}/analysis/by_checkpoint/)"
+            )
         if args.train.use_wandb:
             wandb.init(
                 name=args.train.wandb_name,
@@ -605,6 +666,86 @@ def main():
         failure_log_path=hf_failure_log_path,
         eval_args=args.eval,
     )
+
+    def render_checkpoint_visuals_and_sync(step: int) -> None:
+        """Flush rank-0 metrics, render the sidecar snapshot, then sync ranks.
+
+        Visualization is deliberately best-effort: a missing plotting package or
+        renderer error is logged but never invalidates an otherwise valid model
+        checkpoint.  The renderer only writes below the repository-side
+        ``visualization_run_dir/analysis`` directory.
+        """
+
+        if args.train.global_rank == 0 and args.train.enable_training_visualization:
+            if training_metrics_writer is not None:
+                try:
+                    training_metrics_writer.flush()
+                except Exception as exc:
+                    logger.warning(
+                        f"Could not flush all metrics before global_step_{step}; "
+                        f"rendering the durable prefix instead: {exc}"
+                    )
+            try:
+                if live_metrics_path is None or not live_metrics_path.exists():
+                    raise FileNotFoundError("No durable structured metric log is available.")
+                render_script = repo_root / "tools" / "render_live_training_visuals.py"
+                render_env = os.environ.copy()
+                mpl_cache = visualization_run_dir / "analysis" / ".matplotlib"
+                mpl_cache.mkdir(parents=True, exist_ok=True)
+                render_env["MPLCONFIGDIR"] = str(mpl_cache)
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(render_script),
+                        "--analysis-run-dir",
+                        str(visualization_run_dir),
+                        "--checkpoint-run-dir",
+                        args.train.output_dir,
+                        "--config-path",
+                        str(visualization_run_dir / "lingbotvla_cli.yaml"),
+                        "--checkpoint-step",
+                        str(step),
+                        "--rolling-window",
+                        str(args.train.training_visualization_rolling_window),
+                    ],
+                    cwd=str(repo_root),
+                    env=render_env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=max(1, args.train.training_visualization_timeout_seconds),
+                )
+                logger.info_rank0(
+                    f"Training visualization saved for global_step_{step}: "
+                    f"{result.stdout.strip()}"
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Checkpoint global_step_{step} is valid, but its automatic visualization failed: {exc}"
+                )
+                failure_dir = (
+                    visualization_run_dir
+                    / "analysis"
+                    / "by_checkpoint"
+                    / f"global_step_{step}"
+                )
+                failure_dir.mkdir(parents=True, exist_ok=True)
+                (failure_dir / "visualization_error.json").write_text(
+                    json.dumps(
+                        {
+                            "checkpoint_step": step,
+                            "error": repr(exc),
+                            "metrics_path": str(live_metrics_path) if live_metrics_path else None,
+                            "checkpoint_is_still_valid": True,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+        # Keep all ranks aligned before the next collective training step.
+        dist.barrier()
 
     def save_hf_checkpoint_best_effort(
         checkpoint_path: str | None,
@@ -965,6 +1106,41 @@ def main():
                         return value.detach().float().item()
                     return value
 
+                def _json_scalar(value):
+                    scalar = _tb_scalar(value)
+                    return None if scalar is None else float(scalar)
+
+                if training_metrics_writer is not None:
+                    try:
+                        training_metrics_writer.write(
+                            {
+                                "timestamp": datetime.now().strftime("%m/%d/%Y %H:%M:%S"),
+                                "step": global_step,
+                                "train_steps_per_epoch": args.train.train_steps,
+                                "epoch": epoch + 1,
+                                "loss": _json_scalar(total_loss),
+                                "vla_loss": _json_scalar(total_vla_loss),
+                                "depth_loss": _json_scalar(total_depth_loss),
+                                "future_depth_loss": _json_scalar(total_future_depth_loss),
+                                "future_video_loss": _json_scalar(total_future_video_loss),
+                                "seq_wise_loss": _json_scalar(total_seq_wise_loss),
+                                "router_z_loss": _json_scalar(total_router_z_loss),
+                                "maxvio": _json_scalar(maxvio_val),
+                                "avg_sigmoid": _json_scalar(sigmoid_val),
+                                "grad_norm": _json_scalar(grad_norm),
+                                "lr": _json_scalar(lr),
+                                "expert_lr": _json_scalar(expert_lr),
+                                "step_time_s": float(delta_time),
+                                "depth_forward_time_s": float(depth_forward_time),
+                                "ignore_batch_num": int(ignore_batch_num),
+                            }
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            f"Disabling automatic structured metric logging after writer failure: {exc}"
+                        )
+                        training_metrics_writer = None
+
                 for key, value in loss_log.items():
                     # every step: cross-layer summaries + seq-wise average + legacy V1 keys
                     if (key.startswith("moe_summary/")
@@ -1114,6 +1290,7 @@ def main():
                 Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
                 dist.barrier()
                 logger.info_rank0(f"Distributed checkpoint saved at {save_checkpoint_path} successfully!")
+                render_checkpoint_visuals_and_sync(global_step)
                 save_hf_checkpoint_best_effort(
                     save_checkpoint_path,
                     state,
@@ -1153,6 +1330,7 @@ def main():
                 Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
                 dist.barrier()
                 logger.info_rank0(f"Distributed checkpoint saved at {save_checkpoint_path} successfully!")
+                render_checkpoint_visuals_and_sync(global_step)
                 save_hf_checkpoint_best_effort(
                     save_checkpoint_path,
                     state,
@@ -1179,6 +1357,7 @@ def main():
             Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
             dist.barrier()
             logger.info_rank0(f"Distributed checkpoint saved at {save_checkpoint_path} successfully!")
+            render_checkpoint_visuals_and_sync(global_step)
             save_hf_checkpoint_best_effort(
                 save_checkpoint_path,
                 state,
@@ -1190,6 +1369,11 @@ def main():
     if max_steps_driven:
         data_loader_tqdm.close()
     if args.train.global_rank == 0:
+        if training_metrics_writer is not None:
+            try:
+                training_metrics_writer.close()
+            except Exception as exc:
+                logger.warning(f"Failed to close automatic training metrics cleanly: {exc}")
         writer.close()
     torch.cuda.synchronize()
     # release memory
