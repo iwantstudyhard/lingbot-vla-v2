@@ -1,6 +1,6 @@
 model:
-  model_path: /scratch/YF_Data/lingbot_workspace/models/robbyant--lingbot-vla-v2-6b/snapshots/master
-  tokenizer_path: /scratch/YF_Data/lingbot_workspace/models/Qwen--Qwen3-VL-4B-Instruct/snapshots/master
+  model_path: /path/to/pretain_ckpt/hf_ckpt
+  tokenizer_path: /path/to/Qwen3-VL-4B-Instruct
   post_training: true
   adanorm_time: true
   config_key: LingbotVLAV2Config
@@ -9,7 +9,7 @@ model:
 data:
   datasets_type: vla
   data_name: multi
-  train_path: assets/training_data/robotwin_clean_only.txt
+  train_path: assets/training_data/robotwin.txt
   robot_config_root: ./configs/robot_configs
   joints:
     - arm.position: 14
@@ -23,14 +23,13 @@ data:
     - arm.position: bounds_99_woclip
     - end.position: bounds_99_woclip
     - effector.position: bounds_99_woclip
-  num_workers: 4
+  num_workers: 8
   use_future_image: true
-  norm_stats_file: assets/norm_stats/robotwin_clean_only.json
 
 train:
-  output_dir: /scratch/YF_Data/lingbot_workspace/train_outputs/robotwin_clean_freeze_vision_bf16
+  output_dir: /path/to/save_ckpt
   moe_monitor_interval: 1000
-  enable_gradient_checkpointing: true # Set to true if GPU memory is insufficient, but this will slow down training.
+  enable_gradient_checkpointing: false # Set to true if GPU memory is insufficient, but this will slow down training.
   precompute_grid_thw: true
   vlm_causal: true
   vlm_fsdp: true
@@ -53,13 +52,12 @@ train:
   data_parallel_mode: fsdp2
   enable_full_shard: false
   module_fsdp_enable: true
-  use_compile: false
+  use_compile: true
   use_wandb: false
   rmpad: false
   rmpad_with_pos_ids: false
   ulysses_parallel_size: 1
-  freeze_vision_encoder: true
-  freeze_vit: true
+  freeze_vision_encoder: false
   tokenizer_max_length: 72
   action_dim: 55
   max_action_dim: 55
@@ -69,16 +67,13 @@ train:
   lr_decay_style: cosine
   optimizer: muon
   num_train_epochs: 29000
-  micro_batch_size: 1
-  global_batch_size: 4
+  micro_batch_size: 32
+  global_batch_size: 1024 # Training uses 32 GPUs: global_batch_size = micro_batch_size * 32
   max_steps: 50000
   ckpt_manager: dcp
-  save_steps: 20000
+  save_steps: 10000
   save_epochs: 29000
-  enable_training_visualization: true
-  training_visualization_flush_steps: 100
-  training_visualization_rolling_window: 200
-  enable_fp32: false
+  enable_fp32: true
   enable_resume: true
   align_params:
     mode: 'query'
@@ -92,8 +87,8 @@ train:
       image_input_size: 224
     depth:
       model_type: MoRGBD
-      moge_path: /scratch/YF_Data/lingbot_workspace/models/depth/moge2-vitb-normal.pt
-      morgbd_path: /scratch/YF_Data/lingbot_workspace/models/robbyant--lingbot-vla-v2-6b/snapshots/master/depth/model.pt
+      moge_path: /path/to/depth/moge2-vitb-normal.pt
+      morgbd_path: /path/to/depth/model.pt
       num_layers: 1
       num_heads: 4
       dim_head: 32
@@ -106,8 +101,8 @@ train:
       block_future_depth_to_action: false
       detach_future_image_feats: true
     video:
-      ckpt_path: /scratch/YF_Data/lingbot_workspace/models/robbyant--lingbot-vla-v2-6b/snapshots/master/dino_video/teacher_step_10000.pth
-      config_path: /scratch/YF_Data/lingbot_workspace/models/robbyant--lingbot-vla-v2-6b/snapshots/master/dino_video/config.yaml
+      ckpt_path: /path/to/dino_video/teacher_step_10000.pth
+      config_path: /path/to/dino_video/config.yaml
       attention_mode: flex_block_causal
       input_size: 256
       block_suffix_to_future_video: false

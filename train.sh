@@ -1,5 +1,6 @@
 #!/bin/bash
 
+set -euo pipefail
 set -x
 
 export TOKENIZERS_PARALLELISM=false
@@ -9,7 +10,7 @@ export TRANSFORMERS_OFFLINE=1
 export HF_HUB_DISABLE_TELEMETRY=1 
 export DISABLE_TELEMETRY=1 
 
-if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
+if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
   NPROC_PER_NODE=$(nvidia-smi -L | wc -l)
 else
   NPROC_PER_NODE=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
@@ -21,6 +22,18 @@ NODE_RANK=${NODE_RANK:=0}
 MASTER_ADDR=${MASTER_ADDR:=0.0.0.0}
 MASTER_PORT=${MASTER_PORT:=62500}
 
+PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+CONFIG_ARG=${2:-training}
+RUN_LABEL=$(basename "$CONFIG_ARG")
+RUN_LABEL=${RUN_LABEL%.*}
+LOG_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+RUN_RANDOM_ID=$(python -c 'import uuid; print(uuid.uuid4().hex[:8])')
+export LINGBOT_TRAIN_RUN_ID=${LINGBOT_TRAIN_RUN_ID:-${LOG_TIMESTAMP}_${RUN_RANDOM_ID}}
+TRAIN_LOG_DIR=${TRAIN_LOG_DIR:-$PROJECT_ROOT/training_logs}
+TRAIN_LOG_FILE=${TRAIN_LOG_FILE:-$TRAIN_LOG_DIR/${RUN_LABEL}_${LINGBOT_TRAIN_RUN_ID}.log}
+mkdir -p "$TRAIN_LOG_DIR"
+echo "Training stdout/stderr log: $TRAIN_LOG_FILE"
+echo "Training visualization run id: $LINGBOT_TRAIN_RUN_ID"
 
 torchrun --nnodes=$NNODES --nproc-per-node $NPROC_PER_NODE --node-rank $NODE_RANK \
-  --master-addr=$MASTER_ADDR --master-port=$MASTER_PORT $@ 2>&1 | tee log.txt
+  --master-addr=$MASTER_ADDR --master-port=$MASTER_PORT "$@" 2>&1 | tee "$TRAIN_LOG_FILE"

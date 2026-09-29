@@ -1,0 +1,22 @@
+[
+  {
+    "parameter": "train.enable_resume",
+    "left": false,
+    "right": true
+  },
+  {
+    "parameter": "train.output_dir",
+    "left": "/scratch/YF_Data/lingbot_workspace/train_outputs/robotwin_clean_freeze_vision_bf16_trial",
+    "right": "/scratch/YF_Data/lingbot_workspace/train_outputs/robotwin_clean_freeze_vision_bf16"
+  },
+  {
+    "parameter": "train.save_steps",
+    "left": 10000,
+    "right": 20000
+  },
+  {
+    "parameter": "train.training_visualization_output_dir",
+    "left": "train_outputs/robotwin_clean_freeze_vision_bf16_trial",
+    "right": "train_outputs/robotwin_clean_freeze_vision_bf16"
+  }
+]
