@@ -189,6 +189,7 @@ defaults to **100 episodes per task** when `--num_episodes` is omitted.
 | `--keep_inference` | leave inference servers resident after sim finishes |
 | `--start_port` | base port for inference servers (default 9330, slot *i* uses base + i) |
 | `--num_episodes` | episodes evaluated per task (default 100; use 1 for a smoke test) |
+| `--progress_interval` | seconds between task/episode progress reports in the launcher terminal (default 30) |
 | `--use_length` | actions executed before observing/replanning (default 10; model predicts a 50-action horizon) |
 | `--server_ready_timeout` | seconds to wait for every policy server's `/healthz` endpoint before starting simulation (default 1800) |
 | `--robo_name` | robot config name (default `robotwin`) |

@@ -17,6 +17,7 @@
 #   --pid_name          PID file prefix (default: test_pid)
 #   --num_tasks         number of sim tasks, taken in order from the task list (default: 50, max: 50)
 #   --num_episodes      episodes evaluated per task (default: 100)
+#   --progress_interval seconds between console progress reports (default: 30)
 #   --task_offset       number of tasks to skip from the start of the task list (default: 0)
 #   --skip_task         task name to exclude from the selected range (repeatable via comma-separated names)
 #   --num_gpus          total GPUs (default: 1)
@@ -54,6 +55,7 @@ start_port=9330
 pid_name="test_pid"
 num_tasks=50
 num_episodes=100
+progress_interval=30
 task_offset=0
 skip_task=""
 num_gpus=1
@@ -81,6 +83,7 @@ while [[ $# -gt 0 ]]; do
         --pid_name)          pid_name="$2";          shift 2 ;;
         --num_tasks)         num_tasks="$2";         shift 2 ;;
         --num_episodes)      num_episodes="$2";      shift 2 ;;
+        --progress_interval) progress_interval="$2"; shift 2 ;;
         --task_offset)       task_offset="$2";       shift 2 ;;
         --skip_task)         skip_task="$2";         shift 2 ;;
         --num_gpus)          num_gpus="$2";          shift 2 ;;
@@ -112,6 +115,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --pid_name          PID file prefix (default: test_pid)"
             echo "  --num_tasks         number of sim tasks (default: 50, max: 50)"
             echo "  --num_episodes      episodes evaluated per task (default: 100)"
+            echo "  --progress_interval seconds between console progress reports (default: 30)"
             echo "  --task_offset       number of tasks to skip from the start (default: 0)"
             echo "  --skip_task         task name to exclude from the selected range"
             echo "  --num_gpus          total GPUs (default: 1)"
@@ -144,6 +148,10 @@ if ! [[ "$server_ready_timeout" =~ ^[0-9]+$ ]] || [ "$server_ready_timeout" -lt 
 fi
 if ! [[ "$num_episodes" =~ ^[0-9]+$ ]] || [ "$num_episodes" -lt 1 ]; then
     echo -e "\033[31mError: --num_episodes must be a positive integer (got '${num_episodes}').\033[0m"
+    exit 1
+fi
+if ! [[ "$progress_interval" =~ ^[0-9]+$ ]] || [ "$progress_interval" -lt 1 ]; then
+    echo -e "\033[31mError: --progress_interval must be a positive integer (got '${progress_interval}').\033[0m"
     exit 1
 fi
 
@@ -276,6 +284,7 @@ echo -e "\033[36mInference config: ${num_gpus} GPU x ${num_per_gpu} servers/GPU 
 echo -e "\033[36mInference precision: use_bf16=${use_bf16}, use_fp32=${use_fp32}, use_compile=${use_compile}\033[0m"
 echo -e "\033[36mControl/video: replan every ${use_length} actions, video_fps=${video_fps}, video=${enable_video}\033[0m"
 echo -e "\033[36mEvaluation length: ${num_episodes} episode(s) per task\033[0m"
+echo -e "\033[36mConsole progress interval: ${progress_interval}s\033[0m"
 
 # ===== Common variables =====
 batch_time=$(date +%Y%m%d_%H%M%S)
@@ -574,6 +583,41 @@ remaining_tasks() {
     echo $((running + queued))
 }
 
+report_progress() {
+    local now_ts=$1
+    local running=0
+    local queued=$(( ${#task_queue[@]} - queue_idx ))
+    local slot task_name log_file elapsed attempt rate_line suc_num done_ep rate_pct progress_text
+
+    for slot in $(seq 0 $((num_slots-1))); do
+        [ "${slot_pid[$slot]}" != "0" ] && running=$((running + 1))
+    done
+
+    echo -e "\033[36m[progress $(date '+%H:%M:%S')] tasks: ${completed} done, ${skipped} skipped, ${running} running, ${queued} queued (total ${total_tasks})\033[0m"
+    for slot in $(seq 0 $((num_slots-1))); do
+        [ "${slot_pid[$slot]}" = "0" ] && continue
+        task_name="${slot_task[$slot]}"
+        log_file="${slot_log[$slot]}"
+        elapsed=$(( now_ts - slot_start[$slot] ))
+        attempt=$(( task_retries[$task_name] + 1 ))
+        progress_text="episodes 0/${num_episodes} (initializing)"
+
+        if [ -f "$log_file" ]; then
+            rate_line=$(tail -n 300 "$log_file" | sed 's/\x1b\[[0-9;]*m//g' | grep -oP 'Success rate: \K.*' | tail -1)
+            if [ -n "$rate_line" ]; then
+                suc_num=$(echo "$rate_line" | grep -oP '^\d+' | head -1)
+                done_ep=$(echo "$rate_line" | grep -oP '/\K\d+' | head -1)
+                rate_pct=$(echo "$rate_line" | grep -oP '=> \K[\d.]+' | head -1)
+                progress_text="episodes ${done_ep}/${num_episodes}, success ${suc_num}, rate ${rate_pct}%"
+            fi
+        fi
+
+        echo "  slot ${slot} / GPU $((slot % num_gpus)): ${task_name} — ${progress_text}, attempt ${attempt}/${max_retries}, elapsed ${elapsed}s"
+    done
+}
+
+last_progress_report=0
+
 while [ $((completed + skipped)) -lt $total_tasks ] && has_running; do
     for slot in $(seq 0 $((num_slots-1))); do
         pid=${slot_pid[$slot]}
@@ -638,6 +682,12 @@ while [ $((completed + skipped)) -lt $total_tasks ] && has_running; do
         fi
     done
 
+    now_ts=$(date +%s)
+    if [ $((now_ts - last_progress_report)) -ge "$progress_interval" ]; then
+        report_progress "$now_ts"
+        last_progress_report=$now_ts
+    fi
+
     # Adaptive shutdown: when remaining tasks < active inference servers, stop idle-slot servers
     remaining=$(remaining_tasks)
     for slot in $(seq 0 $((num_slots-1))); do
@@ -672,6 +722,7 @@ echo -e "\033[36mGenerating stats file: ${stats_file}\033[0m"
     echo "  Model path: ${model_path}"
     echo "  Tasks: ${num_tasks}"
     echo "  Episodes per task: ${num_episodes}"
+    echo "  Console progress interval: ${progress_interval}s"
     echo "  Task Config: ${task_config}"
     echo "  Inference: ${num_gpus} GPU x ${num_per_gpu}/GPU = ${num_slots} slots"
     echo "  Precision: use_bf16=${use_bf16}, use_fp32=${use_fp32}, use_compile=${use_compile}"
