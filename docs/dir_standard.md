@@ -8,7 +8,7 @@
 lingbot-vla-v2/
 ├── .git/                              # Git 元数据
 ├── .gitignore
-├── .gitmodules                        # RoboTwin 路径声明；URL 和子模块引用后续补充
+├── .gitmodules                        # RoboTwin 子模块路径与 URL
 ├── LICENSE
 ├── Makefile
 ├── README.md
@@ -119,7 +119,7 @@ lingbot-vla-v2/
 │                   ├── _result.txt
 │                   └── episode*_success.mp4
 │
-├── RoboTwin/                          # 预留子模块位置，后续由工作区维护者添加
+├── RoboTwin/                          # 独立 Git 子模块，固定到明确提交
 │
 ├── scripts/                           # 数据下载、统计和评测脚本
 ├── tasks/
@@ -172,7 +172,9 @@ export OUTPUT_DIR="$WORKSPACE/outputs"
 
 `OUTPUT_DIR` 指向统一产物根目录；训练和评测分别使用其下的 `train_outputs/` 和 `eval_outputs/`。显式命令行路径优先，其次是规范环境变量、旧变量别名，最后是配置默认值。`MODEL_PATH`、`QWEN3VL_PATH`、`EVAL_WORKDIR`、`OUTPUT_BASE` 继续兼容；`OUTPUT_BASE` 和 `--output_base` 直接表示评测分类目录，不再追加 `eval_outputs/`。
 
-clean 阶段一默认从 `models/lingbot-vla-v2-6b/` 的 foundation 权重初始化；阶段二必须用 `--init-hf` 选择阶段一 checkpoint。`MODEL_DIR` 的表格默认用于评测，不能将评测权重默认替换 clean 阶段一的 foundation 权重。当前 `.gitmodules` 只声明 RoboTwin 路径，未填写 URL，也未注册子模块引用。
+clean 阶段一默认从 `models/lingbot-vla-v2-6b/` 的 foundation 权重初始化；阶段二必须用 `--init-hf` 选择阶段一 checkpoint。`MODEL_DIR` 的表格默认用于评测，不能将评测权重默认替换 clean 阶段一的 foundation 权重。RoboTwin 已登记为子模块；其内部 XPolicyLab 继续由 RoboTwin 固定提交引用。cuRobo 按已有安装脚本安装到 `RoboTwin/envs/curobo/`，不登记为子模块。
+
+RoboTwin 的源码、`env_cfg/`、`description/` 和仿真资源 `assets/` 保留其内部布局。下载及采集的完整轨迹默认位于 `$WORKSPACE/datasets/RoboTwin/<task_config>/<task>/<embodiment>/`，其中 `data/`、`video/`、`instruction/`、种子及缓存结构不变。`ROBOTWIN_DATA_ROOT`（旧别名 `XPOLICYLAB_DATA_ROOT`）可覆盖轨迹根，`HF_ARCHIVE_CACHE` 可覆盖下载缓存根，默认 `<轨迹根>/download_cache/`。LeRobot 转换默认输出到 `$WORKSPACE/datasets/<repo_id>/`，继续支持 `HF_LEROBOT_HOME` 覆盖；这些变量中的相对路径按工作区解析。
 
 ## 4. 路径解析约定
 
@@ -206,3 +208,5 @@ $OUTPUT_DIR/eval_outputs/<实验名>_<检查点步数>k_<task_config>_<时间戳
 ```
 
 该目录名作为本次评测的运行 ID。一次脚本启动生成一个运行目录，包含本次启动涉及的全部推理服务日志、任务日志、PID 文件、统计文件和评测结果。任务结果按现有脚本的命名写入 `eval_results/<任务名>/`；不在本规范中将现有目录重命名为其他结构。open-loop 评测的轨迹图默认位于 `$OUTPUT_DIR/eval_outputs/open_loop_<run_id>/`，不生成 RoboTwin 专用的日志、PID 或视频目录。
+
+RoboTwin 原生 XPolicyLab 调度器保留其微秒时间戳运行目录名，默认落在 `$OUTPUT_DIR/eval_outputs/<时间戳>/`。其实际产物为 `logs/`、`jobs/`、`summary.json`，任务结果和视频集中到同次运行的 `eval_results/<任务>/<策略>/<task_config>/<checkpoint>/<时间戳>/`。独立策略服务入口同样在 `eval_outputs/<时间戳>/` 保存现有服务日志，单任务客户端保留任务内部层级。显式 `--output-dir` 保持原生调度器的分类根含义，客户端 `--output_dir` 为任务结果根，不重复追加 `eval_outputs/`。客户端同步到 RoboTwin 的文件由主项目管理，并在子仓库中忽略。

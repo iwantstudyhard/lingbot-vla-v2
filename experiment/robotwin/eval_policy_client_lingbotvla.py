@@ -71,10 +71,10 @@ def main(usr_args):
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     task_name = usr_args["task_name"]
     task_config = usr_args["task_config"]
-    ckpt_setting = usr_args["ckpt_setting"]
+    ckpt_setting = usr_args.get("ckpt_setting") or usr_args.get("train_config_name", "default")
     # checkpoint_num = usr_args['checkpoint_num']
     policy_name = usr_args["policy_name"]
-    instruction_type = usr_args["instruction_type"]
+    instruction_type = usr_args.get("instruction_type")
     save_dir = None
     video_save_dir = None
     video_size = None
@@ -83,6 +83,8 @@ def main(usr_args):
     task_config_path = Path(CONFIGS_PATH) / f"{task_config}.yml"
     with task_config_path.open("r", encoding="utf-8") as f:
         args = yaml.load(f.read(), Loader=yaml.FullLoader)
+
+    instruction_type = instruction_type or args["eval_instruction"]
 
     args['task_name'] = task_name
     args["task_config"] = task_config
@@ -423,7 +425,10 @@ def parse_args_and_config():
     parser.add_argument("--overrides", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
-    with open(args.config, "r", encoding="utf-8") as f:
+    config_path = Path(os.path.expandvars(args.config)).expanduser()
+    if not config_path.is_absolute():
+        config_path = WORKSPACE / config_path
+    with config_path.open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     # Parse overrides

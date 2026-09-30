@@ -1,109 +1,53 @@
-# Generate Lerobot Dataset from RoboTwin Data
+# RoboTwin Data and Evaluation
 
-This guide explains how to process raw data from **RoboTwin** and convert it into the **LerobotDataset** format following the official RoboTwin instructions.
-
-## 1. Clone the Official RoboTwin Repository
-```bash
-# Run from the lingbot-vla-v2 workspace; submodule registration is maintained separately.
-git clone git@github.com:RoboTwin-Platform/RoboTwin.git RoboTwin
-cd RoboTwin
-git checkout 13c3c47ff4312dd62484bcd51be034af55c062d1
-```
-
-## 2. Create Required Directories
-Navigate to the `policy/pi0` directory inside the cloned RoboTwin repository and create the folders:
+Paths follow [dir_standard.md](../../docs/dir_standard.md). RoboTwin is a pinned
+submodule, with XPolicyLab pinned inside it. Initialize the recorded versions from
+the lingbot-vla-v2 workspace:
 
 ```bash
-cd ./policy/pi0
-mkdir processed_data training_data
+git submodule update --init --recursive RoboTwin
+export WORKSPACE="$PWD"
+export ROBOTWIN_DIR="$WORKSPACE/RoboTwin"
 ```
 
-## 3. Convert RoboTwin Raw Data to HDF5
+Install the simulator dependencies using the existing RoboTwin installation guide.
+Its scripts live in `RoboTwin/scripts/`, task configs in `RoboTwin/env_cfg/task_config/`,
+and cuRobo installs into `RoboTwin/envs/curobo/`. Simulator assets stay under
+`RoboTwin/assets/`.
 
-Download [official dataset](https://huggingface.co/datasets/TianxingChen/RoboTwin2.0/tree/main/dataset) and unzip the dataset to '/path/to/RoboTwin/data'
-
-**Example:**
-```bash
-data
-└── adjust_bottle
-    └── aloha-agilex_clean_50
-```
-
-Use the provided script [process_data_pi0.sh](https://github.com/RoboTwin-Platform/RoboTwin/blob/main/policy/pi0/process_data_pi0.sh):
+## Download or Collect Trajectories
 
 ```bash
-cd policy/pi0
-bash process_data_pi0.sh ${task_name} ${task_config} ${expert_data_num}
+bash "$ROBOTWIN_DIR/scripts/download_xpolicylab_data.sh" adjust_bottle
+# Optional custom collection (requires the simulator environment):
+bash "$ROBOTWIN_DIR/collect_data.sh" adjust_bottle demo_clean 0
 ```
 
-**Example (clean demo):**
-```bash
-bash process_data_pi0.sh adjust_bottle aloha-agilex_clean_50 50
-```
+Both commands default to
+`$WORKSPACE/datasets/RoboTwin/<task_config>/<task>/<embodiment>/`, retaining the
+existing `data/`, `video/`, `instruction/`, seed and cache files. Use
+`ROBOTWIN_DATA_ROOT` (legacy alias `XPOLICYLAB_DATA_ROOT`) to override this root.
+Archive caching defaults to `<data root>/download_cache/` and supports
+`HF_ARCHIVE_CACHE`. Relative local paths resolve against `WORKSPACE`.
 
-**Example (randomized demo):**
-```bash
-bash process_data_pi0.sh adjust_bottle aloha-agilex_randomized_500 50
-```
+## Convert to LeRobot
 
-If successful, the output folder:
-```
-processed_data/${task_name}-${task_config}-${expert_data_num}/
-```
-
-## 4. Prepare Training Data
-
-Copy the required processed datasets into `training_data/${model_name}`:
+Use an environment with the matching LeRobot version. Existing converters preserve
+the trajectory data and image decoding behavior; their input root matches download
+and collection, and their output defaults to `$WORKSPACE/datasets/<repo_id>/`.
+`HF_LEROBOT_HOME` remains an explicit override for the output root.
 
 ```bash
-cp -r processed_data/${task_name}-${task_config}-${expert_data_num} \
-      training_data/${model_name}/
+python "$ROBOTWIN_DIR/XPolicyLab/scripts/transform_lerobot_v21_format.py" \
+  "demo_clean.*.aloha_agilex" --repo_id robotwin_demo_clean_aloha_agilex --max_episode 50
+python "$ROBOTWIN_DIR/XPolicyLab/scripts/transform_lerobot_v30_format.py" \
+  "demo_clean.*.aloha_agilex" --repo_id RoboTwin_lerobot_v30 --max_episode 50
 ```
 
-## 5. Ensure Sufficient Disk Space
+The training manifests stay versioned in `assets/training_data/`. Point them at the
+actual converted dataset directories under `datasets/`.
 
-The following conversion is performed by RoboTwin. Store completed local datasets
-under `$WORKSPACE/datasets/` and reference them from `assets/training_data/` manifests;
-RoboTwin's raw working files retain its own directory layout.
-
-The generated **LerobotDataset** will be stored under:
-
-```
-$XDG_CACHE_HOME/huggingface/lerobot/${repo_id}
-```
-
-By default, `XDG_CACHE_HOME` points to `~/.cache`, which must have sufficient free space.  
-If space is low, change the cache location:
-
-```bash
-export XDG_CACHE_HOME=/path/to/your/cache
-```
-
-## 6. Generate LerobotDataset v2.1 Format
-
-Run [generate.sh ](https://github.com/RoboTwin-Platform/RoboTwin/blob/main/policy/pi0/generate.sh) to convert the HDF5 datasets to Lerobot.
-
-Parameters:
-- **hdf5_path**: Path to the HDF5 training data (e.g., `./training_data/${model_name}/`)
-- **repo_id**: Name for the dataset (e.g., `my_repo`)
-
-```bash
-bash generate.sh ${hdf5_path} ${repo_id}
-```
-
-**Example:**
-```bash
-bash generate.sh ./training_data/demo_clean/ demo_clean_repo
-```
-
-Output:
-```
-${XDG_CACHE_HOME}/huggingface/lerobot/${repo_id}
-```
-
----
-
-## 7. Simulated Evaluation (Inference + RoboTwin Sim)
+## Simulated Evaluation (Inference + RoboTwin Sim)
 
 After training, evaluate your checkpoint on the 50 RoboTwin tasks (100 episodes each) with
 [`start_robotwin_infer_and_eval.sh`](./start_robotwin_infer_and_eval.sh). It starts
@@ -118,8 +62,8 @@ category directory and do not receive another `eval_outputs` suffix.
 
 ### Prerequisites
 
-1. **RoboTwin repo** cloned and its dependencies installed (steps 1–2 above). The launcher
-   needs the repo **root** path (the one containing `envs/`, `assets/`, `task_config/`, `script/`).
+1. **RoboTwin repo** cloned and its dependencies installed. The launcher
+   needs the repo **root** path (the one containing `envs/`, `assets/`, `env_cfg/`, `scripts/`).
 2. **Two conda environments**:
    - inference side — e.g. `lingbotvla` (PyTorch + this repo's model code).
    - sim side — `RoboTwin` (sapien / mplib / curobo / open3d …), built against numpy 1.26.x.
@@ -134,7 +78,7 @@ category directory and do not receive another `eval_outputs` suffix.
 > The launcher **auto-copies** the eval client (`eval_policy_client_lingbotvla.py` + the small
 > `deploy/` helpers) from this repo into `<RoboTwin>/script/`, and **self-heals** the curobo
 > embodiment `.yml` and editable-install `.pth` paths to point at the RoboTwin checkout you
-> pass. No manual path setup is needed when relocating RoboTwin.
+> pass. The synchronized files are ignored by the RoboTwin repository; their source remains versioned in the main project.
 
 ### Run the full benchmark (50 tasks)
 
