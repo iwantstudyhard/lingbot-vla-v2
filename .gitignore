@@ -2,3 +2,7 @@ __pycache__/
 *.py[cod]
 **/.matplotlib/
 training_logs/
+*.egg-info/
+/train_outputs/robotwin_clean_stage1/
+/train_outputs/robotwin_clean_stage2/
+/train_outputs/stage2_preview/

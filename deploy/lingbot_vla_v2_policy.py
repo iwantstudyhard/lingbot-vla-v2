@@ -30,6 +30,7 @@ from lingbotvla.models.vla.lingbot_vla.modeling_lingbot_vla_v2 import LingbotVla
 from lingbotvla.models.vla.lingbot_vla.qwen3vl_in_vla import apply_lingbot_qwen3_vl_patch
 
 from lingbotvla.data.vla_data.utils import FeatureTransform
+from lingbotvla.utils.normalization_contract import resolve_inference_normalization
 from lingbotvla.models import build_processor
 import time
 import random
@@ -203,6 +204,7 @@ class LingbotVLAv2Server:
         self.use_length = use_length
         self.chunk_ret = chunk_ret
         self.robot_norm_path = robot_norm_path
+        self._robot_norm_override = robot_norm_path
 
         self.task_description = None
 
@@ -329,8 +331,10 @@ class LingbotVLAv2Server:
             self.vla.model.qwenvl_with_expert = torch.compile(self.vla.model.qwenvl_with_expert)
             self.sample_actions_fn = torch.compile(self.vla.model.sample_actions)
 
-        if self.robot_norm_path is None:
-            self.robot_norm_path = data_config.norm_stats_file
+        self.robot_norm_path = resolve_inference_normalization(
+            path_to_pi_model, training_config, override=self._robot_norm_override,
+        )
+        print(f"Actual inference normalization: {self.robot_norm_path}")
 
         print('Model initialized ... ')
 

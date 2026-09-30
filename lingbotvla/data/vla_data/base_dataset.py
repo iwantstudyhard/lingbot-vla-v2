@@ -37,6 +37,7 @@ from datasets import load_dataset as _hf_load_dataset
 from ...utils import logging
 from .utils import FeatureTransform
 from .video_utils import decode_video_frames
+from ...utils.episode_boundaries import bounded_timestamps
 
 
 logger = logging.get_logger(__name__)
@@ -73,10 +74,12 @@ class LeRobotDataset(BaseLeRobotDataset):
         self,
         repo_id: str,
         load_image: bool = True,
+        video_episode_boundary: bool = False,
         **kwargs,
     ):
         super().__init__(repo_id, **kwargs)
         self.load_image = load_image
+        self.video_episode_boundary = video_episode_boundary
 
     def _query_hf_dataset(self, query_indices: dict[str, list[int]]) -> dict:
         """
@@ -112,7 +115,13 @@ class LeRobotDataset(BaseLeRobotDataset):
                 # query timestamps are relative to the episode start.
                 ep = self.meta.episodes[ep_idx]
                 from_timestamp = ep[f"videos/{vid_key}/from_timestamp"]
-                query_ts = [from_timestamp + ts for ts in query_ts]
+                if self.video_episode_boundary:
+                    query_ts, _ = bounded_timestamps(
+                        query_ts, float(from_timestamp),
+                        float(ep[f"videos/{vid_key}/to_timestamp"]), float(self.meta.fps),
+                    )
+                else:
+                    query_ts = [from_timestamp + ts for ts in query_ts]
 
             video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
             frames = decode_video_frames(video_path, query_ts, self.tolerance_s, self.video_backend)
@@ -189,7 +198,8 @@ class VLADataset(Dataset):
                         processor, disabled_image_features, do_nomalize, \
                         chunk_size=chunk_size, return_item_befor_padding=return_item,\
                         image_augment=image_augment, use_depth_align=use_depth_align,
-                        use_future_image=use_future_image)
+                        use_future_image=use_future_image,
+                        norm_stats_path=getattr(dataset_config, "norm_stats_file", None))
         else:
             self.feature_transform = feature_transform
 
@@ -209,7 +219,8 @@ class VLADataset(Dataset):
             repo_id=repo_id,
             image_transforms=Resize(image_size),
             delta_timestamps=merged_delta,
-            load_image=load_image
+            load_image=load_image,
+            video_episode_boundary=bool(getattr(dataset_config, "video_episode_boundary", False)),
         )
 
         self.return_item = return_item

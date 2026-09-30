@@ -8,6 +8,14 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-green"></a>
 </p>
 
+## 本分支的竞赛训练入口
+
+官方正文保留作参考。仅使用官方 clean demonstrations 的本地流程请看
+[两阶段训练指南](docs/clean_training/README.md)；
+全部本地修改、历史归一化问题和重构注意事项见
+[官方对比交接文档](docs/REFACTOR_HANDOFF.md)。
+旧 clean 自定义配置已备份并退出有效配置目录，请勿再用旧命令恢复到新的训练目标。
+
 ## Overview
 
 **LingBot-VLA 2.0** is a practical Vision-Language-Action foundation model designed to move from large-scale pre-training toward reliable real-world robot applications.
