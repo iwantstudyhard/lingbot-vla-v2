@@ -1,6 +1,6 @@
 model:
   model_path: models/robbyant--lingbot-vla-v2-6b/snapshots/master
-  tokenizer_path: models/Qwen--Qwen3-VL-4B-Instruct
+  tokenizer_path: models/Qwen--Qwen3-VL-4B-Instruct/snapshots/master
   post_training: true
   adanorm_time: true
   config_key: LingbotVLAV2Config
