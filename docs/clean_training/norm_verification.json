@@ -1,0 +1,270 @@
+{
+  "dataset_root": "D:\\Google下载\\RoboTwin_lerobot_v30\\RoboTwin_lerobot_v30",
+  "count": 548893,
+  "episodes": 2500,
+  "horizon": 50,
+  "state_rows": 548893,
+  "action_chunk_elements": 27444650,
+  "method": "float64 weighted moments + exact weighted empirical quantiles; official merged absolute-action chunk semantics",
+  "quantile_difference": "Reference uses adaptive 5000-bin histogram; exact empirical quantiles can differ",
+  "comparison_passed": true,
+  "comparison": {
+    "observation.state.arm.position": {
+      "mean": {
+        "max_abs_diff": 0.000004470018863500513,
+        "within_tolerance": true
+      },
+      "std": {
+        "max_abs_diff": 0.0000048809899870772,
+        "within_tolerance": true
+      },
+      "min": {
+        "max_abs_diff": 0,
+        "within_tolerance": true
+      },
+      "max": {
+        "max_abs_diff": 0,
+        "within_tolerance": true
+      },
+      "q01": {
+        "max_abs_diff": 0.003950357437133789,
+        "within_tolerance": true
+      },
+      "q99": {
+        "max_abs_diff": 0.0047380924224853516,
+        "within_tolerance": true
+      },
+      "q02": {
+        "max_abs_diff": 0.004034996032714844,
+        "within_tolerance": true
+      },
+      "q98": {
+        "max_abs_diff": 0.007491588592529297,
+        "within_tolerance": true
+      }
+    },
+    "observation.state.effector.position": {
+      "mean": {
+        "max_abs_diff": 0.0000010755433301756767,
+        "within_tolerance": true
+      },
+      "std": {
+        "max_abs_diff": 0.0000017313905431026733,
+        "within_tolerance": true
+      },
+      "min": {
+        "max_abs_diff": 0,
+        "within_tolerance": true
+      },
+      "max": {
+        "max_abs_diff": 0,
+        "within_tolerance": true
+      },
+      "q01": {
+        "max_abs_diff": 0,
+        "within_tolerance": true
+      },
+      "q99": {
+        "max_abs_diff": 0.00020003318786621094,
+        "within_tolerance": true
+      },
+      "q02": {
+        "max_abs_diff": 0,
+        "within_tolerance": true
+      },
+      "q98": {
+        "max_abs_diff": 0.00020003318786621094,
+        "within_tolerance": true
+      }
+    },
+    "action.arm.position": {
+      "mean": {
+        "max_abs_diff": 0.0000014345886285571652,
+        "within_tolerance": true
+      },
+      "std": {
+        "max_abs_diff": 0.000002363575548169905,
+        "within_tolerance": true
+      },
+      "min": {
+        "max_abs_diff": 0,
+        "within_tolerance": true
+      },
+      "max": {
+        "max_abs_diff": 0,
+        "within_tolerance": true
+      },
+      "q01": {
+        "max_abs_diff": 0.0036126375198364258,
+        "within_tolerance": true
+      },
+      "q99": {
+        "max_abs_diff": 0.004176020622253418,
+        "within_tolerance": true
+      },
+      "q02": {
+        "max_abs_diff": 0.00823354721069336,
+        "within_tolerance": true
+      },
+      "q98": {
+        "max_abs_diff": 0.0032442808151245117,
+        "within_tolerance": true
+      }
+    },
+    "action.effector.position": {
+      "mean": {
+        "max_abs_diff": 2.440568657169351e-7,
+        "within_tolerance": true
+      },
+      "std": {
+        "max_abs_diff": 2.1272163402974442e-7,
+        "within_tolerance": true
+      },
+      "min": {
+        "max_abs_diff": 0,
+        "within_tolerance": true
+      },
+      "max": {
+        "max_abs_diff": 0,
+        "within_tolerance": true
+      },
+      "q01": {
+        "max_abs_diff": 0,
+        "within_tolerance": true
+      },
+      "q99": {
+        "max_abs_diff": 0.00020003318786621094,
+        "within_tolerance": true
+      },
+      "q02": {
+        "max_abs_diff": 0,
+        "within_tolerance": true
+      },
+      "q98": {
+        "max_abs_diff": 0.00020003318786621094,
+        "within_tolerance": true
+      }
+    }
+  },
+  "reference_sha256": "f308b63ba72f761ffbc16ce6f34cfb28e52fffb4485f249a7aee1a0186f11dc6",
+  "data_sources": [
+    {
+      "path": "meta/info.json",
+      "sha256": "ed99eff664b96fc21ed167838b0eff35b90339fb4c84416cc0b7215d7222f061"
+    },
+    {
+      "path": "meta/episodes/chunk-000/file-000.parquet",
+      "sha256": "8ff04cb8f0b3614f805d91c075b10de3ec7421046b1d691933b5401d5a06a58f"
+    },
+    {
+      "path": "meta/episodes/chunk-001/file-000.parquet",
+      "sha256": "13c4077fc6aff2355e06e39f2f713ce9cd1cd4ee458a19c03cb03cef01b0df0e"
+    },
+    {
+      "path": "meta/episodes/chunk-002/file-000.parquet",
+      "sha256": "b9ae750050a325f0b18c28b95d7b5d7dfcd4f1042327599540a7f34588f197bb"
+    },
+    {
+      "path": "data/chunk-000/file-000.parquet",
+      "sha256": "6dd17bf3f19976b5c529bdacd5ff56a47a55be47f0c00a07776e9f1c41f63028"
+    },
+    {
+      "path": "data/chunk-000/file-001.parquet",
+      "sha256": "9a34aa74cf687cf45e3d2d355528323f0ef7532248e06dca2c626f4f938efb73"
+    },
+    {
+      "path": "data/chunk-000/file-002.parquet",
+      "sha256": "caddec58502602a7dc9c87e361626874e4b2ccf7d07996e2aacd16cb0a58f447"
+    },
+    {
+      "path": "data/chunk-000/file-003.parquet",
+      "sha256": "f054b9f3e074339bbcfa3e721e3a4205b39a3d8c0ce68bfeb2c410e063352afd"
+    },
+    {
+      "path": "data/chunk-000/file-004.parquet",
+      "sha256": "1578a909d6ba4d606b983cb088b5c55df87f9a63806325056a17498b3191d089"
+    },
+    {
+      "path": "data/chunk-000/file-005.parquet",
+      "sha256": "19940b2c9036631db91f911461cebad11c2db33f04ad596ee0a97ea0b9215bb6"
+    },
+    {
+      "path": "data/chunk-000/file-006.parquet",
+      "sha256": "52257221fc50f85a91430de792849616a6cf4a7dc80cfe148112605a67d09bc7"
+    },
+    {
+      "path": "data/chunk-000/file-007.parquet",
+      "sha256": "7194efed9a8f7c2991e2bfc2d0585ae99c5fdffe456fe7dd736d183d7ad958e3"
+    },
+    {
+      "path": "data/chunk-000/file-008.parquet",
+      "sha256": "12f166888cdfa706613a124a4f8668164f56dd1302ab98ed8cf0bd9bbc7bf3d5"
+    },
+    {
+      "path": "data/chunk-000/file-009.parquet",
+      "sha256": "e8d52eef9239ffa1d33c563cd5934913b074543b8ffda02158a2a4ab799a70df"
+    },
+    {
+      "path": "data/chunk-001/file-000.parquet",
+      "sha256": "703c71ab47e6424b09b3b32dbdd011ce2010067f2765e1da82d23c2067fd8d5b"
+    },
+    {
+      "path": "data/chunk-001/file-001.parquet",
+      "sha256": "09bbd660b3c6e30c5cc2859153e50ff353980f63e443fd48851a770cbd2d275c"
+    },
+    {
+      "path": "data/chunk-001/file-002.parquet",
+      "sha256": "ac890a64b8986187fd91799e65d5570579c07e030e38c1d7daacf2eeb156c320"
+    },
+    {
+      "path": "data/chunk-001/file-003.parquet",
+      "sha256": "c940c3f55f0facda3d76d3abca053b03066a2788e3dbbd3f80afbabec93f8ca4"
+    },
+    {
+      "path": "data/chunk-001/file-004.parquet",
+      "sha256": "473c95a35049973729007504449dc917b26122cbd982341732ab422e3739bdb9"
+    },
+    {
+      "path": "data/chunk-001/file-005.parquet",
+      "sha256": "c026a5d47167cc65e3b57d0562fc1c7610294699ccd4eea2b2a915a65fde4169"
+    },
+    {
+      "path": "data/chunk-001/file-006.parquet",
+      "sha256": "f9d5f4e4a42c0182928bbff0d906eab18d5d7cf42fe3535fbf080b1fe3845495"
+    },
+    {
+      "path": "data/chunk-001/file-007.parquet",
+      "sha256": "d891513a3697cb274d595af0c7af15297f2c9ffc8d6b52864dde77b3f38cfb98"
+    },
+    {
+      "path": "data/chunk-001/file-008.parquet",
+      "sha256": "1f5b4602ea4c1f800ff710aab70f92d5fe18b288ff8d8bd6a34e010bb5b6e54a"
+    },
+    {
+      "path": "data/chunk-001/file-009.parquet",
+      "sha256": "dca840eae4c6aecda24cfe78b32aded91c8e6fef8861abd20298dbc49356372c"
+    },
+    {
+      "path": "data/chunk-002/file-000.parquet",
+      "sha256": "1ab703cf32e421cdaede519d6af09dc95d0f8a12455f5bd70b3c60e110e1e486"
+    },
+    {
+      "path": "data/chunk-002/file-001.parquet",
+      "sha256": "3080c9b1edfac5ab08136c242f10f169e037f41d340fae23f41d219b7ff7d3e9"
+    },
+    {
+      "path": "data/chunk-002/file-002.parquet",
+      "sha256": "7285c51fa7e07d69720c070ff940de35c775b0422d86492f8ac7288447965a96"
+    },
+    {
+      "path": "data/chunk-002/file-003.parquet",
+      "sha256": "7be085bbc3585128a737c708f929b0eb46bab382f5edb57a6c758bd89207b3a9"
+    },
+    {
+      "path": "data/chunk-002/file-004.parquet",
+      "sha256": "93e2579408bdf7c04f48f505740ef9f74dc791e8e3318489e9dc2857d8d57301"
+    }
+  ],
+  "source_fingerprint": "4bfcd48ebdd3f10acf48e57ccb2fa6c5d394915869d0bfa3e3f5b45ea8966085",
+  "origin_claim": "User-provided official clean copy; no random directory read. Dataset provenance still requires official source confirmation."
+}

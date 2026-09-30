@@ -3,9 +3,7 @@ __pycache__/
 *.egg-info/
 **/.matplotlib/
 
-# Local training artifacts
-training_logs/
-/train_outputs/
+# Generated logs and backups
 *.log
 *.exit
 *.bak*

@@ -46,6 +46,7 @@ from lingbotvla.utils.checkpoint_retention import (
     update_best_checkpoint_record,
 )
 from lingbotvla.utils.training_metrics import AsyncTrainingMetricsWriter, build_visualization_run_dir
+from lingbotvla.utils.normalization_contract import freeze_normalization
 from lingbotvla.utils.arguments import EvalArguments, DataArguments, ModelArguments, TrainingArguments, parse_args, save_args
 from lingbotvla.utils.dist_utils import all_reduce
 from lingbotvla.models.config_registry import get_config_registry
@@ -333,6 +334,8 @@ class MyTrainingArguments(TrainingArguments):
 
 @dataclass
 class MyDataArguments(DataArguments):
+    video_episode_boundary: bool = field(default=False)
+    require_normalization_contract: bool = field(default=False)
     source_name: str = field(
         default=None,
         metadata={"help": "Source name of dataset."},
@@ -385,8 +388,12 @@ class Arguments:
     eval: "EvalArguments" = field(default_factory=EvalArguments)
 
 
-def main():
-    args = parse_args(Arguments)
+def main(*, arguments_class=None, dataset_builder=None, validate_args=None,
+         batch_callback=None, checkpoint_callback=None):
+    # Optional extension points; the normal stage-one entry supplies none.
+    args = parse_args(arguments_class or Arguments)
+    if validate_args is not None:
+        validate_args(args)
     repo_root = Path(__file__).resolve().parents[2]
     visualization_run_dir = build_visualization_run_dir(
         repo_root,
@@ -398,6 +405,22 @@ def main():
     logger.info_rank0(json.dumps(asdict(args), indent=2))
     torch.cuda.set_device(f"cuda:{args.train.local_rank}")
     dist.init_process_group(backend="nccl")
+    if args.data.require_normalization_contract:
+        normalization_result = [None]
+        if args.train.global_rank == 0:
+            try:
+                normalization_result[0] = freeze_normalization(
+                    args.data.norm_stats_file, args.train.output_dir,
+                    expected_count=args.data.expected_num_frames,
+                    allow_existing=args.train.enable_resume or bool(args.train.load_checkpoint_path),
+                )
+            except Exception as exc:
+                normalization_result[0] = {"error": str(exc)}
+        dist.broadcast_object_list(normalization_result, src=0)
+        if "error" in normalization_result[0]:
+            raise RuntimeError(normalization_result[0]["error"])
+        args.data.norm_stats_file = normalization_result[0]["path"]
+        logger.info_rank0(f"Frozen normalization contract: {json.dumps(normalization_result[0])}")
     helper.set_seed(args.train.seed, args.train.enable_full_determinism)
     if args.train.local_rank == 0:
         helper.enable_third_party_logging()
@@ -510,8 +533,17 @@ def main():
     if args.data.dataloader_type == "native":
         if args.data.datasets_type == 'vla':
             args.data.chunk_size = args.train.chunk_size
-            train_dataset = build_vla_dataset(dataset_config=args.data, model_config=args.model, config=model.config, processor=processor, use_depth_align=use_depth_align)
+            dataset_factory = dataset_builder or build_vla_dataset
+            train_dataset = dataset_factory(dataset_config=args.data, model_config=args.model, config=model.config, processor=processor, use_depth_align=use_depth_align)
             actual_num_frames = len(train_dataset)
+            if args.data.require_normalization_contract:
+                datasets = getattr(train_dataset, "_datasets", [train_dataset])
+                expected_norm = Path(args.data.norm_stats_file).resolve()
+                for dataset in datasets:
+                    loaded_norm = Path(dataset.feature_transform.norm_stats_path).resolve()
+                    if loaded_norm != expected_norm:
+                        raise RuntimeError(f"Actual normalizer source mismatch: {loaded_norm} != {expected_norm}")
+                logger.info_rank0(f"Actual dataset normalizer verified: {expected_norm}")
             if (
                 args.data.expected_num_frames is not None
                 and actual_num_frames != args.data.expected_num_frames
@@ -828,6 +860,11 @@ def main():
                     + "\n",
                     encoding="utf-8",
                 )
+        if args.train.global_rank == 0 and checkpoint_callback is not None:
+            try:
+                checkpoint_callback(step, visualization_run_dir)
+            except Exception as exc:
+                logger.warning(f"Extension preview failed for global_step_{step}: {exc}")
         # Keep all ranks aligned before the next collective training step.
         dist.barrier()
 
@@ -981,8 +1018,12 @@ def main():
                 logger.info_rank0(f"Failed to load checkpoint {cp}: {repr(e)}. Trying older one...")
                 continue
         if not loaded:
+            if args.data.require_normalization_contract:
+                raise RuntimeError("Audited resume failed: no valid checkpoint loaded; refusing to restart silently") from last_err
             logger.info_rank0("Starting training from scratch. No valid checkpoint could be loaded.")
     else:
+        if args.data.require_normalization_contract and (args.train.enable_resume or args.train.load_checkpoint_path):
+            raise RuntimeError("Audited resume requested but no checkpoints were found")
         logger.info_rank0("Starting training from scratch.")
 
     # A resumed run starts a fresh best-checkpoint averaging window immediately
@@ -1051,6 +1092,8 @@ def main():
             torch.cuda.synchronize()
             start_time = time.time()
             for micro_batch in micro_batches:
+                if batch_callback is not None:
+                    batch_callback(micro_batch, global_step, args.train.global_rank)
                 future_video_targets = None
                 future_video_current_preds = None
                 future_video_cls_targets = None

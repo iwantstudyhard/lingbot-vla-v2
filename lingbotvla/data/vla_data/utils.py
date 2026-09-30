@@ -88,6 +88,7 @@ class FeatureTransform:
             norm_stats_path = robot_config.pop('norm_stats')
         else:
             robot_config.pop('norm_stats')
+        self.norm_stats_path = str(os.path.abspath(norm_stats_path)) if norm_stats_path else None
 
         
         self.feature_config = FeatureInfo()

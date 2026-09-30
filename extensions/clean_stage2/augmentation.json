@@ -1,0 +1,17 @@
+{
+  "branch_probabilities": {"clean": 0.3, "photometric": 0.4, "texture": 0.2, "clutter": 0.1},
+  "brightness": [0.75, 1.25],
+  "contrast": [0.8, 1.2],
+  "gamma": [0.8, 1.25],
+  "saturation": [0.9, 1.1],
+  "white_balance": [0.95, 1.05],
+  "noise_std": [0.0, 0.0117647059],
+  "blur_sigma": [0.2, 0.6],
+  "jpeg_quality": [75, 95],
+  "shadow_strength": [0.0, 0.2],
+  "texture_alpha": 0.2,
+  "clutter_max_image_fraction": 0.03,
+  "safe_margin_pixels": 8,
+  "teacher_clean": true,
+  "safe_profiles": {}
+}

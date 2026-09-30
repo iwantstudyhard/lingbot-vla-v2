@@ -25,12 +25,21 @@ data:
     - effector.position: bounds_99_woclip
   num_workers: 4
   use_future_image: true
-  norm_stats_file: assets/norm_stats/robotwin_clean_only.json
+  image_augment: false
+  norm_stats_file: assets/norm_stats/robotwin_clean_verified.json
+  require_normalization_contract: true
+  video_episode_boundary: true
+  # The consolidated clean-50 dataset and its normalization statistics both
+  # contain exactly 548,893 frames. Abort before step 1 if either changes.
+  expected_num_frames: 548893
+  require_norm_stats_count_match: true
 
 train:
-  output_dir: /scratch/YF_Data/lingbot_workspace/train_outputs/robotwin_clean_local
+  # Keep this separate from the old 20k run. enable_resume must never pick up
+  # optimizer state produced with the frozen-vision, unmasked objective.
+  output_dir: train_outputs/robotwin_clean_stage1/REQUIRED_NEW_RUN
   moe_monitor_interval: 1000
-  enable_gradient_checkpointing: false # Set to true if GPU memory is insufficient, but this will slow down training.
+  enable_gradient_checkpointing: true
   precompute_grid_thw: true
   vlm_causal: true
   vlm_fsdp: true
@@ -58,24 +67,46 @@ train:
   rmpad: false
   rmpad_with_pos_ids: false
   ulysses_parallel_size: 1
+
+  # Match the official RoboTwin setting: train both the Qwen3-VL vision tower
+  # and the language/action model. Depth and DINO teachers remain frozen in code.
   freeze_vision_encoder: false
+  freeze_vit: false
+  train_expert_only: false
+  train_state_proj: true
+
   tokenizer_max_length: 72
   action_dim: 55
   max_action_dim: 55
   max_state_dim: 55
-  lr: 1.0e-4
-  lr_min: 5.0e-5
+
+  # BF16 is retained for the 4 x 48GB setup. micro_batch_size controls peak
+  # device memory; gradient accumulation raises the effective global batch.
+  enable_fp32: false
+  micro_batch_size: 1
+  gradient_accumulation_steps: 8
+  global_batch_size: 32
+
+  # Conservative small-batch fine-tuning schedule. 18k optimizer steps is
+  # approximately one pass over the 548,893-frame clean dataset at GBS 32.
+  lr: 1.0e-5
+  lr_min: 1.0e-6
+  lr_warmup_ratio: 0.03
   lr_decay_style: cosine
   optimizer: muon
   num_train_epochs: 29000
-  micro_batch_size: 1
-  global_batch_size: 4
-  max_steps: 50000
+  max_steps: 18000
+
   ckpt_manager: dcp
-  save_steps: 10000
+  save_steps: 500
   save_epochs: 29000
-  enable_fp32: true
+  max_checkpoints_to_keep: 3
+  keep_best_checkpoint: true
   enable_resume: false
+  enable_training_visualization: true
+  training_visualization_flush_steps: 100
+  training_visualization_rolling_window: 200
+
   align_params:
     mode: 'query'
     num_task_tokens: 8
@@ -111,12 +142,10 @@ train:
       use_shared_future_task_proj: true
       use_current_shared_task_proj: true
       num_future_frames: 1
-      # Keeps DINO teacher input as [warmup current, current, future].
-      # Current-DINO target uses current_index=1 in code.
       use_warmup_frame: true
       effective_fps: 1.0
       n_blocks: 1
-      cls_pool: last
+      cls_pool: 'last'
       detach_image_feats: true
       num_layers: 1
       num_heads: 4
@@ -128,13 +157,12 @@ train:
       use_smooth_l1_loss: false
       use_mse_loss: true
       mse_loss_weight: 1.0
-      # Enables current-DINO patch alignment and current depth/DINO shared query projection.
       use_patch_loss: true
       use_current_patch_loss: true
       use_cosine_loss: true
       cosine_loss_weight: 0.2
       use_cls_loss: false
-      cls_loss_type: mse
+      cls_loss_type: 'mse'
       cls_loss_weight: 0.2
       log_max_samples: 32
       log_scale: 16

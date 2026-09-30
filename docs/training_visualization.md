@@ -1,5 +1,12 @@
 # Training visualization and checkpoint isolation
 
+> Historical layout below documents the earlier external-checkpoint runs.
+> New audited clean stage1/stage2 launchers keep checkpoints, normalization and
+> visualizations together inside a unique repository-side run.
+> See [current clean-training guide](clean_training/README.md). Old offline plots
+> and external checkpoint paths are preserved; their existence does not prove
+> that the historical run used the newly verified normalization.
+
 The RobotWin training job uses two deliberately separate roots on the server.
 
 ## Server layout

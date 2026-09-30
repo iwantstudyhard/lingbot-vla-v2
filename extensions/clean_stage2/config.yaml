@@ -1,5 +1,5 @@
 model:
-  model_path: /scratch/YF_Data/lingbot_workspace/models/robbyant--lingbot-vla-v2-6b/snapshots/master
+  model_path: /REQUIRED_STAGE1_CHECKPOINT/hf_ckpt
   tokenizer_path: /scratch/YF_Data/lingbot_workspace/models/Qwen--Qwen3-VL-4B-Instruct/snapshots/master
   post_training: true
   adanorm_time: true
@@ -7,6 +7,9 @@ model:
   moe_implementation: fused
 
 data:
+  # Only the separate stage2 entry recognizes this setting.
+  stage2_augmentation_config: extensions/clean_stage2/augmentation.json
+  image_augment: false
   datasets_type: vla
   data_name: multi
   train_path: assets/training_data/robotwin_clean_only.txt
@@ -25,16 +28,17 @@ data:
     - effector.position: bounds_99_woclip
   num_workers: 4
   use_future_image: true
-  norm_stats_file: assets/norm_stats/robotwin_clean_only.json
+  norm_stats_file: assets/norm_stats/robotwin_clean_verified.json
+  require_normalization_contract: true
+  video_episode_boundary: true
   # The consolidated clean-50 dataset and its normalization statistics both
   # contain exactly 548,893 frames. Abort before step 1 if either changes.
   expected_num_frames: 548893
   require_norm_stats_count_match: true
 
 train:
-  # Keep this separate from the old 20k run. enable_resume must never pick up
-  # optimizer state produced with the frozen-vision, unmasked objective.
-  output_dir: /scratch/YF_Data/lingbot_workspace/train_outputs/robotwin_clean_unfreeze_vision_bf16_masked_gbs32
+  # Independent snapshot: not inherited from or written into the stage1 config.
+  output_dir: train_outputs/robotwin_clean_stage2/REQUIRED_NEW_RUN
   moe_monitor_interval: 1000
   enable_gradient_checkpointing: true
   precompute_grid_thw: true
@@ -84,22 +88,21 @@ train:
   gradient_accumulation_steps: 8
   global_batch_size: 32
 
-  # Conservative small-batch fine-tuning schedule. 18k optimizer steps is
-  # approximately one pass over the 548,893-frame clean dataset at GBS 32.
-  lr: 1.0e-5
-  lr_min: 1.0e-6
-  lr_warmup_ratio: 0.03
+  # Low-LR clean-only visual adaptation; launch.py chooses a fresh pilot run.
+  lr: 3.0e-6
+  lr_min: 3.0e-7
+  lr_warmup_ratio: 0.1
   lr_decay_style: cosine
   optimizer: muon
   num_train_epochs: 29000
-  max_steps: 18000
+  max_steps: 1500
 
   ckpt_manager: dcp
   save_steps: 500
   save_epochs: 29000
   max_checkpoints_to_keep: 3
   keep_best_checkpoint: true
-  enable_resume: true
+  enable_resume: false
   enable_training_visualization: true
   training_visualization_flush_steps: 100
   training_visualization_rolling_window: 200
