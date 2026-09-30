@@ -1,4 +1,16 @@
 __pycache__/
 *.py[cod]
+*.egg-info/
 **/.matplotlib/
+
+# Local training artifacts
 training_logs/
+/train_outputs/
+*.log
+*.exit
+*.bak*
+
+# Workspace-local data and generated artifacts (repository root only)
+/datasets/
+/models/
+/outputs/
