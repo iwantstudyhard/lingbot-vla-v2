@@ -13,6 +13,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from lingbotvla.utils.arguments import workspace_path
+
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 from transformers import (
     AutoConfig,
@@ -49,8 +51,8 @@ set_seed_everywhere(42)
 
 BASE_MODEL_PATH = {
     'qwen3vl': os.environ.get(
-        'QWEN3VL_PATH',
-        'Qwen/Qwen3-VL-4B-Instruct/',
+        'QWEN3VL_DIR',
+        os.environ.get('QWEN3VL_PATH') or str(workspace_path('models/Qwen3-VL-4B-Instruct')),
     ),
 }
 
@@ -272,6 +274,7 @@ class LingbotVLAv2Server:
             print("⚠️ Warning: 'vision_config' not found in qwen_config!")
 
     def load_vla(self, path_to_pi_model) -> LingbotVlaV2Policy:
+        path_to_pi_model = str(workspace_path(path_to_pi_model))
         print(f"loading model from: {path_to_pi_model}")
         
         # load training config
@@ -297,7 +300,9 @@ class LingbotVLAv2Server:
             model_name = 'qwen3vl'
         else: 
             raise ValueError(f"Unsupported base model of {path_to_pi_model}")
-        base_model_path = os.environ.get('QWEN3VL_PATH', training_base_model) or BASE_MODEL_PATH[model_name]
+        base_model_path = os.environ.get('QWEN3VL_DIR') or os.environ.get('QWEN3VL_PATH') or training_base_model or BASE_MODEL_PATH[model_name]
+        if Path(base_model_path).is_absolute() or base_model_path.startswith(('models/', '.')) or workspace_path(base_model_path).exists():
+            base_model_path = str(workspace_path(base_model_path))
         config.tokenizer_path = base_model_path
         self.model_name = model_name
         
@@ -354,7 +359,7 @@ class LingbotVLAv2Server:
         self.last_action_chunk = None
         self.last_normalized_action_chunk = None
 
-        robot_config = f'configs/robot_configs/{robo_name}.yaml'
+        robot_config = str(workspace_path(f'configs/robot_configs/{robo_name}.yaml'))
         
         with open(robot_config, 'r') as f:
           self.robot_config = yaml.safe_load(f)
@@ -553,6 +558,7 @@ def main():
     parser.add_argument(
         "--model_path",
         type=str,
+        default=os.environ.get("MODEL_DIR") or os.environ.get("MODEL_PATH") or str(workspace_path("models/lingbot-vla-v2-6b-robotwin")),
     )
 
     parser.add_argument(

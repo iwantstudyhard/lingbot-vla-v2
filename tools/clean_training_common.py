@@ -11,12 +11,13 @@ import yaml
 from lingbotvla.utils.episode_boundaries import bounded_timestamps
 from lingbotvla.utils.normalization_contract import semantic_hash
 from tools.verify_clean_norm import file_hash
+from lingbotvla.utils.arguments import workspace_path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = workspace_path(".")
 
 
 def validate_hf(weights):
-    weights = Path(weights).expanduser().resolve()
+    weights = resolve_path(weights, REPO_ROOT)
     if not (weights / "config.json").is_file():
         raise ValueError(f"Missing HF config: {weights}")
     if not any(weights.glob("*.safetensors")) and not (weights / "pytorch_model.bin").is_file():
@@ -31,8 +32,7 @@ def validate_hf(weights):
 
 
 def resolve_path(value, repo_root):
-    path = Path(value).expanduser()
-    return path.resolve() if path.is_absolute() else (repo_root / path).resolve()
+    return workspace_path(value, repo_root)
 
 
 def preflight(config, repo_root=REPO_ROOT):
@@ -103,10 +103,15 @@ def environment(gpus, port):
     env = os.environ.copy()
     env.update(CUDA_VISIBLE_DEVICES=",".join(devices), MASTER_PORT=str(port),
                NNODES="1", NODE_RANK="0", MASTER_ADDR="127.0.0.1",
-               LINGBOT_TRAIN_RUN_ID=datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8])
-    env.pop("TRAIN_LOG_FILE", None)
+               WORKSPACE=str(REPO_ROOT),
+               LINGBOT_TRAIN_RUN_ID=os.environ.get("LINGBOT_TRAIN_RUN_ID") or datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8])
+    env.pop("LINGBOT_TRAIN_RUN_DIR", None)
     return env
 
 
 def load_config(path):
-    return yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    config = yaml.safe_load(resolve_path(path, REPO_ROOT).read_text(encoding="utf-8"))
+    tokenizer = os.environ.get("QWEN3VL_DIR") or os.environ.get("QWEN3VL_PATH")
+    if tokenizer:
+        config.setdefault("model", {})["tokenizer_path"] = str(resolve_path(tokenizer, REPO_ROOT))
+    return config

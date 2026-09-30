@@ -53,6 +53,8 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "$REPO_ROOT"
+REPO_ROOT="$(cd "${WORKSPACE:-$REPO_ROOT}" && pwd)"
 
 CONDA_BASE="$(conda info --base)"
 eval "$(conda shell.bash hook)"
@@ -148,15 +150,6 @@ assert_torch_stack
 # unpinned huggingface_hub/numpy/opencv/gradio, which breaks the training pins.
 # Its optional train/test dataloader imports `pipeline`, but LingBot training
 # only needs the MoGe model code, so skip that PyPI-only dependency here.
-python - <<PY
-import site
-from pathlib import Path
-
-site_packages = Path(site.getsitepackages()[0])
-pth = site_packages / "stablevla_local_depth.pth"
-pth.write_text("${REPO_ROOT}/lingbotvla/models/vla/vision_models/morgbd_clean/3rd/utils3d\n")
-print("wrote", pth)
-PY
 python -m pip install -e "${REPO_ROOT}/lingbotvla/models/vla/vision_models/lingbot-depth" --no-deps
 python -m pip install -e "${REPO_ROOT}/lingbotvla/models/vla/vision_models/MoGe"
 assert_torch_stack

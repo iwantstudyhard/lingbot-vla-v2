@@ -5,6 +5,12 @@ import importlib
 import inspect
 import os
 import sys
+from datetime import datetime
+import uuid
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+from lingbotvla.utils.arguments import workspace_path
 
 import numpy as np
 from matplotlib import pyplot as plt
@@ -20,10 +26,6 @@ try:
 except ImportError:
     from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
     LEROBOT_DATASET_API = "v2"
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 POLICY_MODULES = {
     "qwen2": "deploy.lingbot_vla_policy",
@@ -289,7 +291,8 @@ def evaluate_single_trajectory(
         traj_id=traj_id,
         action_keys=policy.vla.feature_transform.org_features['actions'],
         action_horizon=action_horizon,
-        save_plot_path=save_plot_path or f"/tmp/open_loop_eval/traj_{traj_id}.jpeg",
+        save_plot_path=save_plot_path or str(workspace_path(os.environ.get("OUTPUT_DIR") or "outputs") / "eval_outputs"
+                                           / f"open_loop_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}" / f"traj_{traj_id}.jpeg"),
     )
 
     return mse, mae
@@ -381,9 +384,22 @@ if __name__ == "__main__":
         help="policy implementation to use; auto reads lingbotvla_cli.yaml",
     )
 
-    parser.add_argument('--save_plot_path', type=str, default='./open_loop_test/')
+    parser.add_argument('--save_plot_path', type=str)
     parser.add_argument('--use_bf16', action='store_true', help='use bfloat16 to reduce GPU memory')
     args = parser.parse_args()
+    cli_plot_override = args.save_plot_path is not None
+
+    args.model_path = str(workspace_path(args.model_path))
+    for name in ("norm_path", "video_debug_dir"):
+        if getattr(args, name):
+            setattr(args, name, str(workspace_path(getattr(args, name))))
+    if args.data_path and (Path(args.data_path).is_absolute() or args.data_path.startswith((".", "datasets/"))):
+        args.data_path = str(workspace_path(args.data_path))
+    args.save_plot_path = str(workspace_path(args.save_plot_path)) if args.save_plot_path else str(
+        workspace_path(os.environ.get("OUTPUT_DIR") or "outputs") / "eval_outputs"
+        / f"open_loop_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}")
+    if not cli_plot_override:
+        Path(args.save_plot_path).mkdir(parents=True, exist_ok=False)
 
     os.makedirs(args.save_plot_path, exist_ok=True)
     traj_ids = args.traj_ids

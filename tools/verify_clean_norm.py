@@ -10,6 +10,10 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lingbotvla.utils.arguments import workspace_path
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -140,6 +144,8 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--report", required=True)
     args = parser.parse_args()
+    for name in ("dataset_root", "reference", "output", "report"):
+        setattr(args, name, str(workspace_path(getattr(args, name))))
     for path in (args.output, args.report):
         if Path(path).exists():
             raise ValueError(f"Refusing to overwrite: {path}")

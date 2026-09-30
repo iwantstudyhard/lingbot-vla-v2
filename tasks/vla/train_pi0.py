@@ -447,6 +447,7 @@ def main():
         if args.train.use_wandb:
             wandb.init(
                 name=args.train.wandb_name,
+                dir=args.train.output_dir,
                 config={**vars(args.model), **vars(args.data), **vars(args.train)},  # flatten dict
             )
 

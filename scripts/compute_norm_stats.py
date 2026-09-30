@@ -4,6 +4,7 @@ import os
 import sys
 import random
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from datetime import datetime, timedelta
 from tqdm import trange, tqdm
 from dataclasses import asdict, dataclass, field
@@ -24,7 +25,6 @@ from lingbotvla.utils.arguments import parse_args
 from lingbotvla.utils.dist_utils import all_reduce
 import lingbotvla.utils.normalize as normalize
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tasks.vla.train_lingbotvla import MyTrainingArguments, MyDataArguments
 
 logger = helper.create_logger(__name__)
@@ -210,7 +210,7 @@ if __name__ == "__main__":
 
 
     filename = '_'.join(list(set(data_names)))
-    tmp_dir = f"tmp/"
+    tmp_dir = os.path.join(args.train.output_dir, "tmp")
     if rank == 0:
         os.makedirs(tmp_dir, exist_ok=True)
     if world_size > 1:

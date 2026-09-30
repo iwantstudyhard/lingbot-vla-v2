@@ -151,13 +151,18 @@ Below we use **RoboTwin 2.0** 50 tasks, trained with clean and randomized data t
 
 ### Training
 
+Paths follow [the workspace directory standard](docs/dir_standard.md). Local datasets and
+weights live under `datasets/` and `models/`; generated artifacts default to `outputs/`.
+`WORKSPACE` anchors relative paths and `OUTPUT_DIR` overrides the artifact root.
+Training uses `train_outputs/<experiment>_<run_id>/`; evaluation uses `eval_outputs/`.
+Explicit output arguments retain their existing final-directory semantics.
+
 We provide a post-training example of **LingBot-VLA 2.0** on RoboTwin 2.0 50 tasks with clean and randomized data:
 
 ```bash
 bash train.sh tasks/vla/train_lingbotvla.py ./configs/vla/robotwin/robotwin.yaml \
   --data.train_path assets/training_data/robotwin.txt \
-  --data.data_name multi \
-  --train.output_dir output/
+  --data.data_name multi
 ```
 
 The post-training config uses sequence-wise auxiliary loss (`sequence_wise_mode: "per_sequence"`, `sequence_wise_loss_coeff: 1e-3`) together with z-loss (`router_z_loss_coeff: 1e-4`) for MoE routing. These terms can be adjusted or disabled depending on the downstream task. To use a loss-free routing setup, comment out the sequence-wise auxiliary loss and z-loss options, and set `bias_update_speed: 0.00025`.
@@ -181,7 +186,7 @@ For real-world scenarios, see the native-depth training configuration [real_robo
 ### Open-Loop Evaluation
 
 ```bash
-export QWEN3_PATH=Qwen/Qwen3-VL-4B-Instruct
+export QWEN3VL_DIR="$PWD/models/Qwen3-VL-4B-Instruct"
 python scripts/open_loop_eval.py \
   --model_path path_to_posttraining_ckpt \
   --robo_name robotwin \
@@ -200,11 +205,10 @@ After installing RoboTwin 2.0 and the LingBot-VLA inference environment, use the
 Clean evaluation:
 
 ```bash
-QWEN3VL_PATH=/path/to/Qwen3-VL-4B-Instruct/ \
-EVAL_WORKDIR=/path/to/RoboTwin/ \
+QWEN3VL_DIR="$PWD/models/Qwen3-VL-4B-Instruct" \
+ROBOTWIN_DIR="$PWD/RoboTwin" \
 bash experiment/robotwin/start_robotwin_infer_and_eval.sh \
-  --model_path /path/to/lingbot-vla-v2-6b-robotwin/checkpoints/global_step_50000/hf_ckpt/ \
-  --output_base /path/to/your/eval_output \
+  --model_path models/lingbot-vla-v2-6b-robotwin/checkpoints/global_step_50000/hf_ckpt/ \
   --task_config demo_clean \
   --num_gpus 8 \
   --num_per_gpu 1
@@ -215,7 +219,7 @@ For randomized evaluation, use the same command with `--task_config demo_randomi
 ### Real-Robot Deployment
 
 ```bash
-export QWEN3VL_PATH=path_to_Qwen3-VL-4B-Instruct
+export QWEN3VL_DIR="$PWD/models/Qwen3-VL-4B-Instruct"
 python -m deploy.lingbot_vla_v2_policy \
   --model_path path_to_posttraining_ckpt \
   --use_compile \

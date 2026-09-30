@@ -12,21 +12,21 @@
 
 ## 训练前只修改这些路径
 
-从仓库根目录、训练环境启动。当前保持原 /scratch 服务器布局，未自动迁移云服务器。
+默认路径遵循 [目录规范](../dir_standard.md)，相对于 `WORKSPACE`（默认仓库根目录）解析。外部资源可通过显式路径参数或环境变量覆盖，不自动搬迁历史产物。
 
-1. `assets/training_data/robotwin_clean_only.txt`：唯一一行 `robotwin /绝对路径/官方clean的LeRobot数据集`。
-2. `configs/vla/robotwin/robotwin_clean_stage1.yaml` 的官方预训练 `model.model_path`。
+1. `assets/training_data/robotwin_clean_only.txt`：唯一一行 `robotwin datasets/RoboTwin_lerobot_v30`；需要外部数据时改为其绝对路径。
+2. `configs/vla/robotwin/robotwin_clean_stage1.yaml` 的官方预训练 `model.model_path`，默认 `models/lingbot-vla-v2-6b/`，可用 `--init-hf` 或 `MODEL_DIR` 覆盖。
 3. 两阶段配置各自的 `model.tokenizer_path`、`align_params.depth.moge_path/morgbd_path`、`align_params.video.ckpt_path/config_path`。
 4. 第二阶段配置独立位于 `extensions/clean_stage2/config.yaml`，不动态继承阶段一文件。
 
-新运行默认全部位于仓库 `train_outputs/robotwin_clean_stage1|robotwin_clean_stage2/<时间戳_UUID>`。不更改以前外部 `train_outputs/.../global_step_20000` 的位置。每次启动自动新名字，不覆盖前次。
+新运行默认位于 `$OUTPUT_DIR/train_outputs/robotwin_clean_stage1_<时间戳_UUID>` 或 `robotwin_clean_stage2_<时间戳_UUID>`；`OUTPUT_DIR` 默认是仓库的 `outputs/`。每次启动自动新名字，不覆盖前次。
 
 保留官方训练环境 Python 3.12/PyTorch 2.8 路线及现有 LeRobot v3/解码依赖；本地 CPU 测试不能代替服务器安装版本验收。启动器只验证权重/依赖路径、clean 文件指纹、元数据和统计，不加载 GPU 模型。
 
 ## 第一阶段：无在线增强的新 clean 基线
 
 ```bash
-cd /scratch/YF_Data/lingbot_workspace/lingbot-vla-v2
+cd /path/to/lingbot-vla-v2
 bash tools/train_clean_stage1.sh --gpus 0,1,2,3 --dry-run
 # 所有检查通过后执行：
 bash tools/train_clean_stage1.sh --gpus 0,1,2,3
@@ -46,7 +46,7 @@ bash tools/train_clean_stage1.sh --gpus 0,1,2,3
 
 ```bash
 bash tools/train_clean_stage1.sh \
-  --resume-run /绝对路径/新阶段一运行目录 \
+  --resume-run outputs/train_outputs/robotwin_clean_stage1_<run_id> \
   --gpus 0,1,2,3 --dry-run
 # 核对后去掉 --dry-run
 ```
@@ -61,7 +61,7 @@ bash tools/train_clean_stage1.sh \
 
 ```bash
 bash extensions/clean_stage2/train.sh \
-  --init-hf /绝对路径/新阶段一运行/checkpoints/global_step_N/hf_ckpt \
+  --init-hf outputs/train_outputs/robotwin_clean_stage1_<run_id>/checkpoints/global_step_N/hf_ckpt \
   --gpus 0,1,2,3 --steps 500 --dry-run
 # 核对后去掉 --dry-run
 ```
@@ -87,8 +87,11 @@ bash extensions/clean_stage2/train.sh \
 ## 输出与查看
 
 ```text
-train_outputs/robotwin_clean_stage1|robotwin_clean_stage2/<时间戳_UUID>/
+outputs/train_outputs/robotwin_clean_stage1_<时间戳_UUID>/  # stage2 同理
+  <配置名>_<本次启动id>.log
   lingbotvla_cli.yaml
+  model_assets/
+  runs/                                # TensorBoard
   normalization/{norm_stats.json,manifest.json}
   stage2_run.json                         # 仅第二阶段
   checkpoints/
@@ -103,7 +106,6 @@ train_outputs/robotwin_clean_stage1|robotwin_clean_stage2/<时间戳_UUID>/
       by_checkpoint/global_step_N/
         report.html / PNG / summary.json
         augmentation/                   # 仅第二阶段：真实训练batch图与参数
-training_logs/<配置名>_<本次启动id>.log
 ```
 
 图表保存是 best-effort：渲染失败不毁掉训练，但日志会告警并留诊断。验收须真实检查图片存在，不能仅看save checkpoint成功。

@@ -5,14 +5,14 @@
 # inference slots from a queue. Finishing a task frees its slot and starts the next.
 #
 # Usage: bash start_robotwin_infer_and_eval.sh [options]
-#   --model_path        inference model path (default: /path/to/your/checkpoint, or $MODEL_PATH)
+#   --model_path        inference model path (default: $WORKSPACE/models/lingbot-vla-v2-6b-robotwin; $MODEL_DIR or legacy $MODEL_PATH)
 #   --inference_script  inference-side module path (default: deploy/lingbot_vla_v2_policy.py)
-#   --inference_workdir inference-side working dir (default: current working dir)
-#   --eval_workdir      sim-side (RoboTwin repo) working dir (REQUIRED; or $EVAL_WORKDIR; default placeholder /path/to/RoboTwin)
+#   --inference_workdir inference-side working dir (default: $WORKSPACE)
+#   --eval_workdir      sim-side (RoboTwin repo) working dir (default: $WORKSPACE/RoboTwin; $ROBOTWIN_DIR or legacy $EVAL_WORKDIR)
 #   --inference_env     inference-side conda env (default: lingbotvla, or $INFERENCE_ENV)
 #   --sim_env           sim-side conda env (default: RoboTwin, or $SIM_ENV)
 #   --conda_sh          conda.sh path to source (default: /path/to/miniconda3/etc/profile.d/conda.sh, or $CONDA_SH)
-#   --output_base       result output path (default: /path/to/VLABenchmarkResult, or $OUTPUT_BASE)
+#   --output_base       result output path (default: $OUTPUT_DIR/eval_outputs; legacy $OUTPUT_BASE is a category directory)
 #   --start_port        starting port (default: 9330)
 #   --pid_name          PID file prefix (default: test_pid)
 #   --num_tasks         number of sim tasks, taken in order from the task list (default: 50, max: 50)
@@ -39,14 +39,23 @@
 # ============================================================
 
 # ===== Parse keyword arguments =====
-export QWEN3VL_PATH="${QWEN3VL_PATH:-/path/to/your/checkpoints/Qwen3-VL-4B-Instruct}"
+script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$script_root" || exit 1
+export WORKSPACE="$(cd "${WORKSPACE:-$script_root}" && pwd)"
+export PYTHONPATH="$WORKSPACE${PYTHONPATH:+:$PYTHONPATH}"
+export QWEN3VL_DIR="${QWEN3VL_DIR:-${QWEN3VL_PATH:-$WORKSPACE/models/Qwen3-VL-4B-Instruct}}"
+export QWEN3VL_PATH="$QWEN3VL_DIR"
 
-project_root="$(pwd)"
+project_root="$WORKSPACE"
 inference_workdir="${project_root}/"
 inference_script="deploy/lingbot_vla_v2_policy.py"
-model_path="${MODEL_PATH:-/path/to/your/checkpoint}"
-eval_workdir="${EVAL_WORKDIR:-/path/to/RoboTwin}"
-output_base="${OUTPUT_BASE:-/path/to/VLABenchmarkResult}"
+model_path="${MODEL_DIR:-${MODEL_PATH:-$WORKSPACE/models/lingbot-vla-v2-6b-robotwin}}"
+eval_workdir="${ROBOTWIN_DIR:-${EVAL_WORKDIR:-$WORKSPACE/RoboTwin}}"
+if [ -n "${OUTPUT_DIR:-}" ]; then
+    output_base="$OUTPUT_DIR/eval_outputs"
+else
+    output_base="${OUTPUT_BASE:-$WORKSPACE/outputs/eval_outputs}"
+fi
 # Conda env names + conda.sh path for both sides (overridable via flags or env).
 inference_env="${INFERENCE_ENV:-lingbotvla}"
 sim_env="${SIM_ENV:-RoboTwin}"
@@ -106,7 +115,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --model_path        inference model path"
             echo "  --inference_script  inference-side module path"
             echo "  --inference_workdir inference-side working dir"
-            echo "  --eval_workdir      sim-side (RoboTwin repo) working dir (REQUIRED; or \$EVAL_WORKDIR)"
+            echo "  --eval_workdir      sim-side (RoboTwin repo) working dir (default: \$WORKSPACE/RoboTwin; \$ROBOTWIN_DIR or legacy \$EVAL_WORKDIR)"
             echo "  --inference_env     inference-side conda env (default: lingbotvla, or \$INFERENCE_ENV)"
             echo "  --sim_env           sim-side conda env (default: RoboTwin, or \$SIM_ENV)"
             echo "  --conda_sh          conda.sh path to source (default: /path/to/miniconda3/etc/profile.d/conda.sh, or \$CONDA_SH)"
@@ -135,6 +144,23 @@ while [[ $# -gt 0 ]]; do
             echo -e "\033[31mUnknown argument: $1\033[0m"; exit 1 ;;
     esac
 done
+
+mapfile -t resolved_paths < <(python - "$model_path" "$eval_workdir" "$output_base" "$inference_workdir" "$inference_script" "$QWEN3VL_DIR" <<'PY'
+import sys
+from lingbotvla.utils.arguments import workspace_path
+for value in sys.argv[1:]:
+    print(workspace_path(value))
+PY
+)
+[ "${#resolved_paths[@]}" -eq 6 ] || exit 1
+model_path="${resolved_paths[0]}"
+eval_workdir="${resolved_paths[1]}"
+export ROBOTWIN_DIR="$eval_workdir"
+output_base="${resolved_paths[2]}"
+inference_workdir="${resolved_paths[3]}"
+inference_script="${resolved_paths[4]}"
+export QWEN3VL_DIR="${resolved_paths[5]}"
+export QWEN3VL_PATH="$QWEN3VL_DIR"
 
 # The model predicts 50 actions.  Evaluation may consume a shorter prefix, but
 # zero, negative, or longer values are invalid for this chunk-return mode.
@@ -230,8 +256,8 @@ trap handle_terminate TERM
 
 
 
-# ===== Working dir (RoboTwin sim side) -- REQUIRED =====
-# Must be supplied via --eval_workdir flag or $EVAL_WORKDIR env. No default.
+# ===== Working dir (RoboTwin sim side) =====
+# Paths were resolved before changing either process working directory.
 if [ -z "$eval_workdir" ]; then
     eval_workdir="${EVAL_WORKDIR:-}"
 fi
@@ -322,10 +348,13 @@ echo -e "\033[36mConsole progress interval: ${progress_interval}s\033[0m"
 batch_time=$(date +%Y%m%d_%H%M%S)
 # Extract experiment name and step from model_path (e.g. qwen35_robotwin_forward_no_mask_30k)
 _exp_name=$(echo "$model_path" | grep -oP '[^/]+(?=/checkpoints)')
+_exp_name=${_exp_name:-$(basename "$model_path")}
 _step_num=$(echo "$model_path" | grep -oP 'global_step_\K\d+')
 _step_k=$(( _step_num / 1000 ))k
 run_dir="${output_base}/${_exp_name}_${_step_k}_${task_config}_${batch_time}"
-mkdir -p "${run_dir}/inference_logs" "${run_dir}/eval_logs"
+mkdir -p "$output_base" || exit 1
+mkdir "$run_dir" || { echo "Refusing to reuse eval run: $run_dir" >&2; exit 1; }
+mkdir "${run_dir}/inference_logs" "${run_dir}/eval_logs" || exit 1
 log_dir="${run_dir}"
 inference_pid_file="${run_dir}/inference_pids.txt"
 eval_pid_file="${run_dir}/eval_pids.txt"

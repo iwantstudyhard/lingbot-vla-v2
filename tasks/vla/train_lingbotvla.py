@@ -150,7 +150,7 @@ class MyTrainingArguments(TrainingArguments):
             "help": (
                 "Base directory for visualization runs. A unique runs/<run-id> directory is "
                 "created below it. By default the base is "
-                "<repository>/train_outputs/<output_dir basename>."
+                "<train.output_dir>/visualizations."
             )
         },
     )
@@ -504,7 +504,7 @@ def main(*, arguments_class=None, dataset_builder=None, validate_args=None,
             moge_model = torch.compile(moge_model)
             morgbd_model = torch.compile(morgbd_model)
         if 'visual_dir' not in args.train.align_params or not args.train.align_params['visual_dir']:
-            args.train.align_params['visual_dir'] = os.path.join(args.train.output_dir, 'images')
+            args.train.align_params.setdefault('visual_dir', os.path.join(args.train.output_dir, 'images'))
         os.makedirs(args.train.align_params['visual_dir'], exist_ok=True)
         if use_future_video:
             print('====Loading Future Video Model====')
@@ -747,6 +747,7 @@ def main(*, arguments_class=None, dataset_builder=None, validate_args=None,
         if args.train.use_wandb:
             wandb.init(
                 name=args.train.wandb_name,
+                dir=args.train.output_dir,
                 config={**vars(args.model), **vars(args.data), **vars(args.train)},  # flatten dict
             )
 

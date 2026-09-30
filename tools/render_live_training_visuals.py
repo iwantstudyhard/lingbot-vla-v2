@@ -16,7 +16,11 @@ import shutil
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+import sys
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lingbotvla.utils.arguments import workspace_path
 
 import analyze_training_log as analysis
 
@@ -36,11 +40,11 @@ FIGURE_DESCRIPTIONS = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--analysis-run-dir", type=Path, required=True)
-    parser.add_argument("--checkpoint-run-dir", type=Path, required=True)
-    parser.add_argument("--config-path", type=Path)
+    parser.add_argument("--analysis-run-dir", type=workspace_path, required=True)
+    parser.add_argument("--checkpoint-run-dir", type=workspace_path, required=True)
+    parser.add_argument("--config-path", type=workspace_path)
     parser.add_argument("--checkpoint-step", type=int, required=True)
-    parser.add_argument("--metrics-path", type=Path)
+    parser.add_argument("--metrics-path", type=workspace_path)
     parser.add_argument("--rolling-window", type=int, default=200)
     return parser.parse_args()
 

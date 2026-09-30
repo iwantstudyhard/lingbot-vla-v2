@@ -4,7 +4,8 @@ This guide explains how to process raw data from **RoboTwin** and convert it int
 
 ## 1. Clone the Official RoboTwin Repository
 ```bash
-git clone git@github.com:RoboTwin-Platform/RoboTwin.git
+# Run from the lingbot-vla-v2 workspace; submodule registration is maintained separately.
+git clone git@github.com:RoboTwin-Platform/RoboTwin.git RoboTwin
 cd RoboTwin
 git checkout 13c3c47ff4312dd62484bcd51be034af55c062d1
 ```
@@ -61,6 +62,10 @@ cp -r processed_data/${task_name}-${task_config}-${expert_data_num} \
 
 ## 5. Ensure Sufficient Disk Space
 
+The following conversion is performed by RoboTwin. Store completed local datasets
+under `$WORKSPACE/datasets/` and reference them from `assets/training_data/` manifests;
+RoboTwin's raw working files retain its own directory layout.
+
 The generated **LerobotDataset** will be stored under:
 
 ```
@@ -105,7 +110,11 @@ After training, evaluate your checkpoint on the 50 RoboTwin tasks (100 episodes 
 `num_gpus * num_per_gpu` resident inference servers (one port each), then runs the sim tasks
 in a **queue-scheduled** fashion against free slots — finishing a task frees its slot and
 starts the next. All flags below also accept the equivalent environment variable
-(`MODEL_PATH`, `EVAL_WORKDIR`, `OUTPUT_BASE`, `CONDA_SH`, `QWEN3VL_PATH`, `INFERENCE_ENV`, `SIM_ENV`).
+(`MODEL_DIR`, `ROBOTWIN_DIR`, `OUTPUT_DIR`, `CONDA_SH`, `QWEN3VL_DIR`, `INFERENCE_ENV`, `SIM_ENV`).
+Paths follow [dir_standard.md](../../docs/dir_standard.md). Explicit flags take priority;
+legacy `MODEL_PATH`, `EVAL_WORKDIR`, `OUTPUT_BASE`, and `QWEN3VL_PATH` remain supported.
+`OUTPUT_DIR` is the artifact root; `--output_base`/`OUTPUT_BASE` are already the evaluation
+category directory and do not receive another `eval_outputs` suffix.
 
 ### Prerequisites
 
@@ -114,7 +123,7 @@ starts the next. All flags below also accept the equivalent environment variable
 2. **Two conda environments**:
    - inference side — e.g. `lingbotvla` (PyTorch + this repo's model code).
    - sim side — `RoboTwin` (sapien / mplib / curobo / open3d …), built against numpy 1.26.x.
-3. **Qwen3-VL backbone** checkpoint used by the VLA vision-language encoder (`QWEN3VL_PATH`).
+3. **Qwen3-VL backbone** checkpoint used by the VLA vision-language encoder (`QWEN3VL_DIR`).
 4. **Your trained HF checkpoint** (`model_path`), e.g. `.../global_step_xxxxx/hf_ckpt`.
 
 > [!IMPORTANT]
@@ -132,12 +141,10 @@ starts the next. All flags below also accept the equivalent environment variable
 > Substitute every `/path/to/...` and the conda env / `conda.sh` path for your machine.
 
 ```bash
-# from this repo's root (so inference_workdir = current working dir)
-QWEN3VL_PATH=/path/to/Qwen3-VL-4B-Instruct \
+# Defaults are anchored to the workspace, independently of the caller's cwd.
+QWEN3VL_DIR="$PWD/models/Qwen3-VL-4B-Instruct" \
 bash experiment/robotwin/start_robotwin_infer_and_eval.sh \
     --model_path     /path/to/your/checkpoint/hf_ckpt \
-    --eval_workdir   /path/to/RoboTwin \
-    --output_base    /path/to/VLABenchmarkResult \
     --conda_sh       /path/to/miniconda3/etc/profile.d/conda.sh \
     --inference_env  lingbotvla \
     --sim_env        RoboTwin \
@@ -158,10 +165,9 @@ Use `--task_config demo_randomized` for the randomized benchmark.
 Verify the pipeline end-to-end without waiting for the full run:
 
 ```bash
-QWEN3VL_PATH=/path/to/Qwen3-VL-4B-Instruct \
+QWEN3VL_DIR="$PWD/models/Qwen3-VL-4B-Instruct" \
 bash experiment/robotwin/start_robotwin_infer_and_eval.sh \
     --model_path   /path/to/your/checkpoint/hf_ckpt \
-    --eval_workdir /path/to/RoboTwin \
     --conda_sh     /path/to/miniconda3/etc/profile.d/conda.sh \
     --task_config  demo_clean \
     --num_tasks 1 --num_episodes 1 --num_gpus 1 --num_per_gpu 1
@@ -174,8 +180,10 @@ defaults to **100 episodes per task** when `--num_episodes` is omitted.
 ### Output layout
 
 ```
-<output_base>/<exp>_<step>k_<task_config>_<timestamp>/
+outputs/eval_outputs/<exp>_<step>k_<task_config>_<timestamp>/
 ├── stats.txt                 # final per-task table + overall success rate
+├── inference_pids.txt
+├── eval_pids.txt
 ├── inference_logs/           # one log per inference server / port
 ├── eval_logs/                # one log per task (per-step progress, success rate)
 └── eval_results/             # per-task videos: episodeN_success.mp4 ...
@@ -208,7 +216,7 @@ the original open-loop chunk setting.
 ### Monitor / stop
 
 ```bash
-RUN=/path/to/VLABenchmarkResult/<exp>_<step>k_<timestamp>
+RUN=outputs/eval_outputs/<exp>_<step>k_<task_config>_<timestamp>
 
 # overall progress (done/skip/fail summary)
 sed 's/\x1b\[[0-9;]*m//g' $RUN/eval_logs/*.log | grep -E "Success rate" | tail

@@ -8,6 +8,7 @@
 lingbot-vla-v2/
 ├── .git/                              # Git 元数据
 ├── .gitignore
+├── .gitmodules                        # RoboTwin 路径声明；URL 和子模块引用后续补充
 ├── LICENSE
 ├── Makefile
 ├── README.md
@@ -31,6 +32,7 @@ lingbot-vla-v2/
 │       └── robotwin/
 │
 ├── datasets/                          # 本地完整数据集，不纳入版本管理
+├── extensions/                        # 扩展代码，纳入版本管理
 │
 ├── deploy/                            # 部署代码，纳入版本管理
 │   ├── image_tools.py
@@ -83,7 +85,22 @@ lingbot-vla-v2/
 │   │       ├── checkpoints/            # checkpoint；实际内容由训练配置决定
 │   │       ├── model_assets/           # 训练使用的模型资源副本
 │   │       ├── runs/                  # TensorBoard 等运行记录
-│   │       ├── analysis/               # 指标、图表、配置快照和分析报告
+│   │       ├── normalization/          # clean 训练统计快照与 manifest
+│   │       ├── stage2_run.json         # 仅第二阶段
+│   │       ├── images/                 # 启用视觉诊断时生成
+│   │       ├── visualizations/
+│   │       │   └── runs/<run_id>/
+│   │       │       ├── lingbotvla_cli.yaml
+│   │       │       └── analysis/
+│   │       │           ├── data/       # JSONL、CSV、统计与配置比较
+│   │       │           ├── figures/
+│   │       │           ├── configs/
+│   │       │           ├── report.html
+│   │       │           └── by_checkpoint/global_step_N/
+│   │       │               └── augmentation/  # 仅第二阶段
+│   │       ├── analysis/               # 手动离线分析工具的默认输出
+│   │       ├── trace/                  # 启用 profiling 时生成
+│   │       ├── wandb/                  # 启用 WandB 时生成
 │   │       ├── lingbotvla_cli.yaml     # 本次启动的有效训练配置
 │   │       ├── <配置名>_<run_id>.log   # 训练控制台日志
 │   │       └── 其他训练产物
@@ -99,9 +116,10 @@ lingbot-vla-v2/
 │           │   └── <任务名>.log
 │           └── eval_results/
 │               └── <任务名>/
+│                   ├── _result.txt
 │                   └── episode*_success.mp4
 │
-├── RoboTwin/                          # 独立 Git 子模块，固定到明确提交
+├── RoboTwin/                          # 预留子模块位置，后续由工作区维护者添加
 │
 ├── scripts/                           # 数据下载、统计和评测脚本
 ├── tasks/
@@ -152,7 +170,9 @@ export OUTPUT_DIR="$WORKSPACE/outputs"
 | `QWEN3VL_DIR` | Qwen3-VL 权重位置 | `$WORKSPACE/models/Qwen3-VL-4B-Instruct` |
 | `OUTPUT_DIR` | 统一运行产物根目录 | `$WORKSPACE/outputs` |
 
-`OUTPUT_DIR` 指向统一产物根目录；训练和评测脚本分别在其下使用 `train_outputs/` 和 `eval_outputs/`。脚本应允许通过环境变量覆盖默认值。若现有脚本使用了不同变量名，应在后续适配时统一映射到此约定。
+`OUTPUT_DIR` 指向统一产物根目录；训练和评测分别使用其下的 `train_outputs/` 和 `eval_outputs/`。显式命令行路径优先，其次是规范环境变量、旧变量别名，最后是配置默认值。`MODEL_PATH`、`QWEN3VL_PATH`、`EVAL_WORKDIR`、`OUTPUT_BASE` 继续兼容；`OUTPUT_BASE` 和 `--output_base` 直接表示评测分类目录，不再追加 `eval_outputs/`。
+
+clean 阶段一默认从 `models/lingbot-vla-v2-6b/` 的 foundation 权重初始化；阶段二必须用 `--init-hf` 选择阶段一 checkpoint。`MODEL_DIR` 的表格默认用于评测，不能将评测权重默认替换 clean 阶段一的 foundation 权重。当前 `.gitmodules` 只声明 RoboTwin 路径，未填写 URL，也未注册子模块引用。
 
 ## 4. 路径解析约定
 
@@ -172,7 +192,9 @@ $OUTPUT_DIR/train_outputs/<实验名>_<run_id>/
 
 训练配置、checkpoint、模型资源、TensorBoard 记录、训练日志、可视化和分析结果等本次启动产生的文件，默认统一放入该目录。原有工具生成的子目录结构保持不变；规范统一的是运行产物根路径。
 
-`run_id` 用于区分每次启动，应在同一次启动的所有相关进程间保持一致，并确保目录名不会与已有运行目录冲突。日志和配置应归属于对应的训练运行目录，不再按默认设置散落在仓库根目录或其他独立输出根目录。
+`run_id` 用于区分每次启动，应在同一次启动的所有相关进程间保持一致，并确保目录名不会与已有运行目录冲突。日志和配置应归属于对应的训练运行目录，不再按默认设置散落在仓库根目录或其他独立输出根目录。显式 `train.output_dir` 直接指定最终运行目录。恢复训练继续使用原运行目录，并为这次启动生成独立的日志与可视化 ID。
+
+离线阶段二预览沿用图片和 manifest，默认位于 `$OUTPUT_DIR/train_outputs/stage2_preview_<run_id>/`；统计计算的临时清单位于本次运行的 `tmp/`，读入后沿用原清理行为。目录树中的可选产物仅在原有功能启用时生成。
 
 
 ## 6. 评测产物约定
@@ -183,4 +205,4 @@ $OUTPUT_DIR/train_outputs/<实验名>_<run_id>/
 $OUTPUT_DIR/eval_outputs/<实验名>_<检查点步数>k_<task_config>_<时间戳>/
 ```
 
-该目录名作为本次评测的运行 ID。一次脚本启动生成一个运行目录，包含本次启动涉及的全部推理服务日志、任务日志、PID 文件、统计文件和评测结果。任务结果按现有脚本的命名写入 `eval_results/<任务名>/`；不在本规范中将现有目录重命名为其他结构。
+该目录名作为本次评测的运行 ID。一次脚本启动生成一个运行目录，包含本次启动涉及的全部推理服务日志、任务日志、PID 文件、统计文件和评测结果。任务结果按现有脚本的命名写入 `eval_results/<任务名>/`；不在本规范中将现有目录重命名为其他结构。open-loop 评测的轨迹图默认位于 `$OUTPUT_DIR/eval_outputs/open_loop_<run_id>/`，不生成 RoboTwin 专用的日志、PID 或视频目录。

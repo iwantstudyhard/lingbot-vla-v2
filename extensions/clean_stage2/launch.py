@@ -6,7 +6,7 @@ from pathlib import Path
 import shlex
 import subprocess
 
-from tools.clean_training_common import REPO_ROOT, environment, load_config, preflight, validate_hf
+from tools.clean_training_common import REPO_ROOT, environment, load_config, preflight, resolve_path, validate_hf
 from lingbotvla.utils.normalization_contract import resolve_inference_normalization, semantic_hash
 from extensions.clean_stage2.augmentation import load_settings
 
@@ -29,8 +29,9 @@ def prepare_command(args, repo_root=REPO_ROOT):
     source_norm = resolve_inference_normalization(weights, {"data": {"require_normalization_contract": True}})
     if semantic_hash(json.loads(Path(source_norm).read_bytes())) != semantic_hash(json.loads(verified_path.read_bytes())):
         raise ValueError("Source model has incompatible normalization scales")
-    output = Path(args.output_dir).expanduser().resolve() if args.output_dir else (
-        repo_root / "train_outputs/robotwin_clean_stage2" / env["LINGBOT_TRAIN_RUN_ID"])
+    output = resolve_path(args.output_dir, repo_root) if args.output_dir else (
+        resolve_path(env.get("OUTPUT_DIR") or "outputs", repo_root) / "train_outputs"
+        / f"robotwin_clean_stage2_{env['LINGBOT_TRAIN_RUN_ID']}")
     if output.exists():
         raise ValueError(f"Choose a NEW stage2 output directory: {output}")
     if output == weights or weights in output.parents or output in weights.parents:

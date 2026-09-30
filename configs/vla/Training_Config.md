@@ -8,8 +8,8 @@ The current real deploy template is `configs/vla/real_robot/real_robot.yaml`.
 
 ```yaml
 model:
-  model_path: /path/to/pretain_ckpt/hf_ckpt
-  tokenizer_path: /path/to/Qwen3-VL-4B-Instruct
+  model_path: models/lingbot-vla-v2-6b
+  tokenizer_path: models/Qwen3-VL-4B-Instruct
   post_training: true
   adanorm_time: true
   config_key: LingbotVLAV2Config
@@ -44,7 +44,7 @@ data:
   use_future_image: true
 
 train:
-  output_dir: /path/to/save_ckpt
+  output_dir: ""  # outputs/train_outputs/<config>_<run_id> by default
   moe_monitor_interval: 1000
   enable_gradient_checkpointing: true  # Saves GPU memory. Set to false when VRAM is sufficient for faster training.
   precompute_grid_thw: true
@@ -159,8 +159,8 @@ train:
 
 ```yaml
 model:
-  model_path: /path/to/pretain_ckpt/hf_ckpt
-  tokenizer_path: /path/to/Qwen3-VL-4B-Instruct
+  model_path: models/lingbot-vla-v2-6b
+  tokenizer_path: models/Qwen3-VL-4B-Instruct
   post_training: true
   adanorm_time: true
   config_key: LingbotVLAV2Config
@@ -189,7 +189,7 @@ data:
   norm_stats_file: assets/norm_stats/robotwin.json
 
 train:
-  output_dir: /path/to/save_ckpt
+  output_dir: ""  # outputs/train_outputs/<config>_<run_id> by default
   moe_monitor_interval: 1000
   enable_gradient_checkpointing: true  # Saves GPU memory. Set to false when VRAM is sufficient for faster training.
   precompute_grid_thw: true
@@ -472,7 +472,7 @@ bash train.sh tasks/vla/train_lingbotvla.py ./configs/vla/real_robot/real_robot.
     --data.train_path /path/to/real_robot_dataset_or_list \
     --data.data_name robot_config_name_or_multi \
     --data.norm_stats_file /path/to/norm_stats.json \
-    --train.output_dir output/ \
+    --train.output_dir outputs/train_outputs/my_experiment_<run_id>/ \
     --train.micro_batch_size 1 \
     --train.gradient_accumulation_steps 1 \
     --train.global_batch_size 4 \

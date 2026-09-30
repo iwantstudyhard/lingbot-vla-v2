@@ -5,10 +5,8 @@ this separate command only helps inspect settings before spending GPU time.
 """
 
 import argparse
-from datetime import datetime
 import json
 from pathlib import Path
-import uuid
 
 import cv2
 import numpy as np
@@ -17,8 +15,9 @@ import pyarrow.parquet as pq
 from .augmentation import augment_views, load_settings, sample_plan
 from lingbotvla.utils.episode_boundaries import bounded_timestamps
 from .previews import render_comparison
+from lingbotvla.utils.arguments import training_output_path, workspace_path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = workspace_path(".")
 CAMERAS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 MODEL_CAMERAS = ("camera_top", "camera_wrist_left", "camera_wrist_right")
 
@@ -30,8 +29,8 @@ def main():
     parser.add_argument("--episodes", type=int, nargs="+", default=[0, 500, 1000])
     parser.add_argument("--output-dir")
     args = parser.parse_args()
-    root = Path(args.dataset_root)
-    settings = load_settings(args.settings)
+    root = workspace_path(args.dataset_root)
+    settings = load_settings(workspace_path(args.settings))
     info = json.loads((root / "meta/info.json").read_text(encoding="utf-8"))
     episodes = {}
     columns = ["episode_index", "length"] + [f"videos/observation.images.{camera}/{field}"
@@ -42,8 +41,7 @@ def main():
                 episodes[episode["episode_index"]] = episode
     if set(args.episodes) != set(episodes):
         raise ValueError("Unknown episode requested")
-    output = Path(args.output_dir) if args.output_dir else REPO_ROOT / "train_outputs/stage2_preview" / (
-        datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8])
+    output = workspace_path(args.output_dir) if args.output_dir else training_output_path({}, [], "stage2_preview")
     output.mkdir(parents=True, exist_ok=False)
     records = []
     for episode_index in args.episodes:

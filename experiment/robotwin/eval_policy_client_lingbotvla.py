@@ -1,6 +1,17 @@
 import sys
 import os
 import subprocess
+from pathlib import Path
+
+WORKSPACE = Path(os.path.expandvars(os.environ.get("WORKSPACE") or str(Path(__file__).resolve().parents[2]))).expanduser()
+if not WORKSPACE.is_absolute():
+    WORKSPACE = Path(__file__).resolve().parents[2] / WORKSPACE
+WORKSPACE = WORKSPACE.resolve()
+robotwin_dir = Path(os.path.expandvars(os.environ.get("ROBOTWIN_DIR") or os.environ.get("EVAL_WORKDIR") or "RoboTwin")).expanduser()
+if not robotwin_dir.is_absolute():
+    robotwin_dir = WORKSPACE / robotwin_dir
+os.chdir(robotwin_dir)
+sys.path.append(str(robotwin_dir / "script"))
 
 sys.path.append("./")
 sys.path.append(f"./policy")
@@ -9,7 +20,6 @@ from envs import CONFIGS_PATH
 from envs.utils.create_actor import UnStableError
 
 import numpy as np
-from pathlib import Path
 from collections import deque
 import traceback
 
@@ -118,9 +128,15 @@ def main(usr_args):
         embodiment_name = str(embodiment_type[0]) + "+" + str(embodiment_type[1])
 
     if usr_args.get("output_dir"):
-        save_dir = Path(usr_args["output_dir"]) / task_name
+        output_path = Path(os.path.expandvars(usr_args["output_dir"])).expanduser()
+        save_dir = (output_path if output_path.is_absolute() else WORKSPACE / output_path) / task_name
     else:
-        save_dir = Path(f"eval_result/{task_name}/{policy_name}/{task_config}/{ckpt_setting}/{current_time}")
+        output_root = Path(os.path.expandvars(os.environ.get("OUTPUT_DIR") or "outputs")).expanduser()
+        if not output_root.is_absolute():
+            output_root = WORKSPACE / output_root
+        save_dir = output_root / "eval_outputs" / f"{policy_name}_{ckpt_setting}_{task_config}_{current_time}" / "eval_results" / task_name
+        if save_dir.exists():
+            raise ValueError(f"Refusing to reuse eval results: {save_dir}")
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # 命令行 --eval_video_log 优先于 YAML 配置

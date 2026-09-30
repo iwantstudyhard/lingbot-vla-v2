@@ -38,6 +38,7 @@ from ...utils import logging
 from .utils import FeatureTransform
 from .video_utils import decode_video_frames
 from ...utils.episode_boundaries import bounded_timestamps
+from ...utils.arguments import workspace_path
 
 
 logger = logging.get_logger(__name__)
@@ -57,8 +58,8 @@ def _get_task_name(tasks, task_idx):
 
 
 def _resolve_lerobot_location(repo_id):
-    repo_path = Path(repo_id).expanduser()
-    if repo_path.exists():
+    repo_path = workspace_path(repo_id)
+    if repo_path.exists() or Path(repo_id).is_absolute() or repo_id.startswith((".", "datasets/")):
         return repo_path.name, repo_path
     return repo_id, None
 

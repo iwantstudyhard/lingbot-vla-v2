@@ -278,7 +278,7 @@ bash train.sh tasks/vla/train_lingbotvla.py ./configs/vla/robotwin/robotwin.yaml
   --data.train_path /path/to/lerobot_dataset \
   --data.robot_config_root ./configs/robot_configs \
   --data.norm_stats_file assets/norm_stats/robotwin.json \
-  --train.output_dir output/
+  --train.output_dir outputs/train_outputs/my_training_<run_id>/
 ```
 
 For multiple datasets, set `--data.data_name multi` and pass a text list through `--data.train_path`:
@@ -289,7 +289,7 @@ bash train.sh tasks/vla/train_lingbotvla.py ./configs/vla/robotwin/robotwin.yaml
   --data.train_path assets/training_data/robotwin.txt \
   --data.robot_config_root ./configs/robot_configs \
   --data.norm_stats_file assets/norm_stats/robotwin.json \
-  --train.output_dir output/
+  --train.output_dir outputs/train_outputs/my_training_<run_id>/
 ```
 
 ## Quick Checklist

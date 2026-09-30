@@ -21,7 +21,7 @@ def build_visualization_run_dir(
     base_dir_override: str | os.PathLike[str] | None = None,
     run_id: str | None = None,
 ) -> Path:
-    """Return a unique repository-side directory for one training launch."""
+    """Return the visualization directory inside this training run."""
 
     repository_root = Path(repository_root)
     if base_dir_override:
@@ -29,7 +29,10 @@ def build_visualization_run_dir(
         if not base_dir.is_absolute():
             base_dir = repository_root / base_dir
     else:
-        base_dir = repository_root / "train_outputs" / Path(checkpoint_output_dir).name
+        output_dir = Path(checkpoint_output_dir)
+        if not output_dir.is_absolute():
+            output_dir = repository_root / output_dir
+        base_dir = output_dir / "visualizations"
 
     run_id = run_id or f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}"
     if not re.fullmatch(r"[A-Za-z0-9._-]+", run_id):

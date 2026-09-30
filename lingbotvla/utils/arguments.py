@@ -21,10 +21,13 @@ import math
 import os
 import sys
 import types
+import uuid
 from collections import defaultdict
 from dataclasses import MISSING, asdict, dataclass, field, fields
+from datetime import datetime
 from enum import Enum
 from inspect import isclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, TypeVar, Union, get_type_hints
 
 import yaml
@@ -35,6 +38,49 @@ from . import logging
 T = TypeVar("T")
 
 logger = logging.get_logger(__name__)
+
+
+def workspace_path(value, workspace=None):
+    """Resolve a local path against WORKSPACE, independently of the caller's cwd."""
+    repository = Path(__file__).resolve().parents[2]
+    root = Path(workspace or os.environ.get("WORKSPACE") or repository).expanduser()
+    if not root.is_absolute():
+        root = repository / root
+    path = Path(os.path.expandvars(str(value))).expanduser()
+    return (path if path.is_absolute() else root / path).resolve()
+
+
+def cli_value(arguments, name, default=None):
+    """Read either --name value or --name=value; the last override wins."""
+    value = default
+    for index, argument in enumerate(arguments):
+        if argument == name:
+            if index + 1 == len(arguments) or arguments[index + 1].startswith("--"):
+                if name != "--train.enable_resume":
+                    raise ValueError(f"{name} requires a value")
+                value = "true"
+            else:
+                value = arguments[index + 1]
+        elif argument.startswith(name + "="):
+            value = argument.split("=", 1)[1]
+    return value
+
+
+def training_output_path(config, arguments, label):
+    """Select the final run directory before launching distributed workers."""
+    if not os.environ.get("LINGBOT_TRAIN_RUN_ID"):
+        if int(os.environ.get("WORLD_SIZE", "1")) > 1:
+            raise ValueError("Distributed launches require LINGBOT_TRAIN_RUN_ID; use train.sh")
+        os.environ["LINGBOT_TRAIN_RUN_ID"] = f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}"
+    run_id = os.environ["LINGBOT_TRAIN_RUN_ID"]
+    if not run_id or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for character in run_id):
+        raise ValueError("Invalid LINGBOT_TRAIN_RUN_ID")
+    os.environ.setdefault("OUTPUT_DIR", str(workspace_path("outputs")))
+    output = cli_value(arguments, "--train.output_dir", config.get("train", {}).get("output_dir"))
+    if output:
+        return workspace_path(output)
+    root = workspace_path(os.environ.get("OUTPUT_DIR") or "outputs")
+    return root / "train_outputs" / f"{label}_{run_id}"
 
 
 @dataclass
@@ -946,18 +992,35 @@ def parse_args(rootclass: T) -> T:
 
             parser.add_argument(f"--{base}.{attr.name}", **parser_kwargs)
 
-    cmd_args = sys.argv[1:]
+    cmd_args = list(sys.argv[1:])
+    original_args = list(cmd_args)
+    workspace = workspace_path(".")
+    os.environ["WORKSPACE"] = str(workspace)
+    # Data manifests and robot configs also contain workspace-relative paths.
+    os.chdir(workspace)
     cmd_args_string = "=".join(cmd_args)  # use `=` to mark the end of arg name
     input_data = {}
-    if cmd_args[0].endswith(".yaml") or cmd_args[0].endswith(".yml"):
+    label = Path(sys.argv[0]).stem
+    if cmd_args and (cmd_args[0].endswith(".yaml") or cmd_args[0].endswith(".yml")):
         input_path = cmd_args.pop(0)
-        with open(os.path.abspath(input_path), encoding="utf-8") as f:
+        label = Path(input_path).stem
+        with workspace_path(input_path).open(encoding="utf-8") as f:
             input_data: Dict[str, Dict[str, Any]] = yaml.safe_load(f)
 
-    elif cmd_args[0].endswith(".json"):
+    elif cmd_args and cmd_args[0].endswith(".json"):
         input_path = cmd_args.pop(0)
-        with open(os.path.abspath(input_path), encoding="utf-8") as f:
+        label = Path(input_path).stem
+        with workspace_path(input_path).open(encoding="utf-8") as f:
             input_data: Dict[str, Dict[str, Any]] = json.load(f)
+
+    if "train" in base_to_subclass:
+        input_data.setdefault("train", {})["output_dir"] = str(training_output_path(input_data, original_args, label))
+    if "model" in base_to_subclass:
+        for name, primary, legacy in (("model_path", "MODEL_DIR", "MODEL_PATH"),
+                                      ("tokenizer_path", "QWEN3VL_DIR", "QWEN3VL_PATH")):
+            value = os.environ.get(primary) or os.environ.get(legacy)
+            if value and cli_value(original_args, f"--model.{name}") is None:
+                input_data.setdefault("model", {})[name] = str(workspace_path(value))
     
     for base, arg_dict in input_data.items():
         for arg_name, arg_value in arg_dict.items():
@@ -977,6 +1040,9 @@ def parse_args(rootclass: T) -> T:
     if remaining_args:
         raise ValueError(f"Some specified arguments are not used by the ArgumentParser: {remaining_args}")
 
+    if "train" in base_to_subclass:
+        vars(args)["train.output_dir"] = input_data["train"]["output_dir"]
+
     parse_result = defaultdict(dict)
     for key, value in vars(args).items():
         if key in dict_fields:
@@ -986,6 +1052,26 @@ def parse_args(rootclass: T) -> T:
                 raise ValueError(f"Expect a json string for dict argument, but got {value}")
 
         base, name = key.split(".", maxsplit=1)
+        if value and isinstance(value, str):
+            if name == "train_path":
+                value = ",".join(str(workspace_path(path)) if path.endswith(".txt") or path.startswith((".", "/", "datasets/")) or Path(path).is_absolute() else path
+                                 for path in value.split(","))
+            elif name in {"output_dir", "training_visualization_output_dir", "robot_config_root", "norm_stats_file",
+                          "norm_path", "stage2_augmentation_config", "load_checkpoint_path"}:
+                value = str(workspace_path(value))
+            elif name in {"model_path", "tokenizer_path", "config_path", "expert_vision_path"}:
+                if Path(value).is_absolute() or value.startswith((".", "models/")) or workspace_path(value).exists():
+                    value = str(workspace_path(value))
+        if name == "align_params" and isinstance(value, dict):
+            for section in (value.get("depth", {}), value.get("video", {})):
+                for path_key in ("moge_path", "morgbd_path", "ckpt_path", "config_path"):
+                    if section.get(path_key):
+                        section[path_key] = str(workspace_path(section[path_key]))
+            if value:
+                value["visual_dir"] = str(workspace_path(value.get("visual_dir") or Path(vars(args)["train.output_dir"]) / "images"))
+        if name == "profile_trace_dir":
+            value = str(workspace_path(value) if cli_value(original_args, "--train.profile_trace_dir") is not None or value != "./trace"
+                        else workspace_path(vars(args)["train.output_dir"]) / "trace")
         parse_result[base][name] = value
 
     data_classes = {}

@@ -97,13 +97,15 @@ lingbot-vla-v2/
   assets/norm_stats/                  # 官方/历史参照与新verified统计
   docs/clean_training/                # 有效命令、核算证据
   tests/                             # CPU回归与服务器集成验收
-  training_logs/                     # 忽略Git
-  train_outputs/                     # 新运行忽略Git；保留旧离线分析
+  datasets/                          # 本地数据，忽略Git
+  models/                            # 本地权重，忽略Git
+  outputs/train_outputs/             # 运行目录内集中日志、checkpoint和可视化
+  outputs/eval_outputs/              # 评测产物，忽略Git
 ```
 
 模型、datasets、RoboTwin仍可在外部workspace。必须存在的训练外部依赖：官方foundation VLA权重、Qwen3-VL-4B-Instruct processor/tokenizer/model config、MoGe权重、LingBot-Depth权重、DINO video teacher权重+config、完整clean LeRobot数据及解码运行库。RoboTwin/assets/仿真conda环境仅评测需要，不是clean训练数据生成依赖。
 
-以后把路径集中管理时，确保两个阶段都显式解析同一设置；不要把多个相对路径解释成不同cwd。当前保持/scratch路径，暂停的云路径改写helper已清理。单卡A10080G配方未在这次实现/验证，不要把4卡GBS32启动器拿去单卡直接跑。
+当前路径以 [dir_standard.md](dir_standard.md) 为准，两个阶段使用同一工作区基准及规范环境变量；本次只更新后续默认路径，不迁移历史运行。单卡A10080G配方未在这次实现/验证，不要把4卡GBS32启动器拿去单卡直接跑。
 
 每个新run必须带有效config、normalization、初始权重来源、增强参数、日志、checkpoint、指标和评测配置。并列运行用不同master端口/推理端口/GPU，不根据输出名猜模型参数。
 

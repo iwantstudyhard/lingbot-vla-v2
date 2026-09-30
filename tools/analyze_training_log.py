@@ -20,7 +20,11 @@ import statistics
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+import sys
 from typing import Any, Iterable
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lingbotvla.utils.arguments import workspace_path
 
 import matplotlib
 
@@ -76,12 +80,12 @@ GRID = "#d1d5db"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--log", type=Path, required=True)
-    parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--official-config", type=Path)
-    parser.add_argument("--alternate-config", type=Path)
-    parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--output", type=Path)
+    parser.add_argument("--log", type=workspace_path, required=True)
+    parser.add_argument("--config", type=workspace_path, required=True)
+    parser.add_argument("--official-config", type=workspace_path)
+    parser.add_argument("--alternate-config", type=workspace_path)
+    parser.add_argument("--run-dir", type=workspace_path, required=True)
+    parser.add_argument("--output", type=workspace_path)
     parser.add_argument("--rolling-window", type=int, default=200)
     return parser.parse_args()
 
@@ -784,7 +788,7 @@ def write_readme(
         "  --log bf16_4gpu_formal.log `",
         "  --config /path/to/that/run/lingbotvla_cli.yaml `",
         "  --official-config configs/vla/robotwin/robotwin.yaml `",
-        "  --run-dir train_outputs/robotwin_clean_freeze_vision_bf16",
+        "  --run-dir outputs/train_outputs/<experiment>_<run_id>",
         "```",
         "",
         "把更完整的日志放回同一路径后重跑，脚本会自动识别 `checkpoints/global_step_*`，并在 `analysis/by_checkpoint/` 创建对应的只读分析快照。",

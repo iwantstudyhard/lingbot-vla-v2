@@ -45,7 +45,7 @@ brightness0.75–1.25、contrast0.8–1.2、gamma0.8–1.25、saturation0.9–1.
 
 ```bash
 bash extensions/clean_stage2/train.sh \
-  --init-hf /新阶段一运行/checkpoints/global_step_N/hf_ckpt \
+  --init-hf outputs/train_outputs/robotwin_clean_stage1_<run_id>/checkpoints/global_step_N/hf_ckpt \
   --gpus 0,1,2,3 --steps 500 --dry-run
 ```
 
@@ -55,11 +55,11 @@ bash extensions/clean_stage2/train.sh \
 
 ```bash
 python -m extensions.clean_stage2.preview \
-  --dataset-root /scratch/YF_Data/lingbot_workspace/datasets/RoboTwin_lerobot_v30 \
+  --dataset-root datasets/RoboTwin_lerobot_v30 \
   --episodes 0 500 1000
 ```
 
-默认写repo下 `train_outputs/stage2_preview/<时间戳_UUID>`。这里只使用OpenCV作诊断，不替代生产解码器验证。
+默认写repo下 `outputs/train_outputs/stage2_preview_<时间戳_UUID>`（根目录由 `OUTPUT_DIR` 覆盖）。这里只使用OpenCV作诊断，不替代生产解码器验证。
 
 ## 真实训练预览与边界
 

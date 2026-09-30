@@ -1,11 +1,12 @@
 """Launch a fresh audited clean baseline, or resume only its own audited run."""
 
 import argparse
+import os
 from pathlib import Path
 import shlex
 import subprocess
 
-from tools.clean_training_common import REPO_ROOT, environment, load_config, preflight, validate_hf
+from tools.clean_training_common import REPO_ROOT, environment, load_config, preflight, resolve_path, validate_hf
 from lingbotvla.utils.normalization_contract import resolve_inference_normalization, semantic_hash
 import json
 
@@ -17,7 +18,7 @@ def prepare_command(args):
     if args.resume_run:
         if args.init_hf or args.output_dir:
             raise ValueError("Resume cannot be combined with new weights/output")
-        output = Path(args.resume_run).expanduser().resolve()
+        output = resolve_path(args.resume_run, REPO_ROOT)
         config_path = output / "lingbotvla_cli.yaml"
         config = load_config(config_path)
         if config.get("data", {}).get("stage2_augmentation_config"):
@@ -36,11 +37,13 @@ def prepare_command(args):
     else:
         config_path = REPO_ROOT / "configs/vla/robotwin/robotwin_clean_stage1.yaml"
         config = load_config(config_path)
-        output = Path(args.output_dir).expanduser().resolve() if args.output_dir else (
-            REPO_ROOT / "train_outputs/robotwin_clean_stage1" / env["LINGBOT_TRAIN_RUN_ID"])
+        output = resolve_path(args.output_dir, REPO_ROOT) if args.output_dir else (
+            resolve_path(env.get("OUTPUT_DIR") or "outputs", REPO_ROOT) / "train_outputs"
+            / f"robotwin_clean_stage1_{env['LINGBOT_TRAIN_RUN_ID']}")
         if output.exists():
             raise ValueError(f"Fresh training needs a NEW output directory: {output}")
-    weights = validate_hf(args.init_hf or config["model"]["model_path"])
+    weights = validate_hf(args.init_hf or (None if args.resume_run else os.environ.get("MODEL_DIR") or os.environ.get("MODEL_PATH"))
+                          or config["model"]["model_path"])
     if output == weights or output in weights.parents or weights in output.parents:
         raise ValueError("Output must not overlap initial weights")
     preflight(config)

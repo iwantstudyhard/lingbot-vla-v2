@@ -78,7 +78,7 @@ robot configs, and normalization statistics, see
 
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
-| `train.output_dir` | str | Required | Path to save model checkpoints. |
+| `train.output_dir` | str | Generated from config name and run ID | Final run directory; defaults to `$OUTPUT_DIR/train_outputs/<config>_<run_id>`. |
 | `train.lr` | float | `5e-5` | Maximum/default learning rate, or initial LR for warmup. |
 | `train.lr_min` | float | `1e-7` | Minimum learning rate. |
 | `train.lr_start` | float | `0.0` | Learning rate at the start of warmup. |

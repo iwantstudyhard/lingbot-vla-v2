@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -39,7 +40,15 @@ def main():
         output = Path(args.train.output_dir).resolve()
         # Validation runs before NCCL init; only rank0 owns directory creation.
         # Other ranks must not reject the marker concurrently written by rank0.
-        if args.train.global_rank == 0 and output.exists():
+        launch_directory = os.environ.get("LINGBOT_TRAIN_RUN_DIR")
+        launch_log = os.environ.get("TRAIN_LOG_FILE")
+        owned_directory = (
+            launch_directory and Path(launch_directory).resolve() == output
+            and launch_log and os.environ.get("LINGBOT_TRAIN_RUN_ID")
+            and output.is_dir()
+            and all(path.resolve() == Path(launch_log).resolve() for path in output.iterdir())
+        )
+        if args.train.global_rank == 0 and output.exists() and not owned_directory:
             raise ValueError(f"Refusing to reuse an output directory: {output}")
         weights = Path(args.model.model_path).resolve()
         if not (weights / "config.json").is_file():
@@ -64,7 +73,8 @@ def main():
             raise ValueError("Stage2 requires audited normalization and episode boundaries")
         runtime["settings"] = load_settings(args.data.stage2_augmentation_config)
         if args.train.global_rank == 0:
-            output.mkdir(parents=True, exist_ok=False)
+            if not owned_directory:
+                output.mkdir(parents=True, exist_ok=False)
             record = {
                 "stage": 2, "initial_hf_weights": str(weights), "optimizer_scheduler": "fresh",
                 "dataset_manifest": args.data.train_path, "augmentation": runtime["settings"],
