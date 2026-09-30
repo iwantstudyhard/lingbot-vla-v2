@@ -81,7 +81,7 @@ We release **LingBot-VLA 2.0** pre-trained weights as a native-depth model.
 To train LingBot-VLA 2.0 with this codebase, weights from [Qwen3-VL-4B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct), [MoGe-2-vitb-normal](https://huggingface.co/Ruicheng/moge-2-vitb-normal), [LingBot-Depth](https://huggingface.co/robbyant/lingbot-vla-v2-6b/tree/main/depth), and [DINO-VIDEO](https://huggingface.co/robbyant/lingbot-vla-v2-6b/tree/main/dino_video) teacher checkpoint/config are also required. See [Training_Config.md](configs/vla/Training_Config.md).
 
 ```bash
-python3 scripts/download_hf_model.py --repo_id robbyant/lingbot-vla-v2-6b --local_dir lingbot-vla
+python3 scripts/download_hf_model.py --repo_id robbyant/lingbot-vla-v2-6b --local_dir models
 ```
 
 ## Pre-Training Data

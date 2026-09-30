@@ -19,6 +19,8 @@
 3. 两阶段配置各自的 `model.tokenizer_path`、`align_params.depth.moge_path/morgbd_path`、`align_params.video.ckpt_path/config_path`。
 4. 第二阶段配置独立位于 `extensions/clean_stage2/config.yaml`，不动态继承阶段一文件。
 
+`--init-hf` / `MODEL_DIR` 仅覆盖主模型，不会同步改写 teacher 路径。使用外部 foundation 或 Hugging Face 缓存 snapshot 时，应将完整模型目录链接到 `models/lingbot-vla-v2-6b/`，或分别修改两阶段 YAML 的 teacher 路径；具体检查与链接示例见 [使用流程](../usage.md#2-准备权重与数据)。
+
 新运行默认位于 `$OUTPUT_DIR/train_outputs/robotwin_clean_stage1_<时间戳_UUID>` 或 `robotwin_clean_stage2_<时间戳_UUID>`；`OUTPUT_DIR` 默认是仓库的 `outputs/`。每次启动自动新名字，不覆盖前次。
 
 保留官方训练环境 Python 3.12/PyTorch 2.8 路线及现有 LeRobot v3/解码依赖；本地 CPU 测试不能代替服务器安装版本验收。启动器只验证权重/依赖路径、clean 文件指纹、元数据和统计，不加载 GPU 模型。

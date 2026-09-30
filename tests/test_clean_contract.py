@@ -36,6 +36,58 @@ class CleanContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 freeze_normalization(self.stats_file, run, 548893)
 
+    def test_snapshot_accepts_current_launcher_log(self):
+        with TemporaryDirectory() as tmp:
+            run = Path(tmp) / "run"
+            run.mkdir()
+            log = run / "stage1_current.log"
+            log.write_text("current launch\n", encoding="utf-8")
+            env = {"LINGBOT_TRAIN_RUN_DIR": str(run), "LINGBOT_TRAIN_RUN_ID": "current",
+                   "TRAIN_LOG_FILE": str(log)}
+            with patch.dict("os.environ", env, clear=True):
+                record = freeze_normalization(self.stats_file, run, 548893)
+                self.assertEqual(Path(record["path"]), run / "normalization/norm_stats.json")
+                self.assertEqual(record["source"], str(self.stats_file.resolve()))
+                self.assertEqual(log.read_text(encoding="utf-8"), "current launch\n")
+                with self.assertRaises(ValueError):
+                    freeze_normalization(self.stats_file, run, 548893)
+
+    def test_launcher_log_does_not_allow_old_training_artifacts(self):
+        for artifact in ("checkpoints", "previous.log"):
+            with self.subTest(artifact=artifact), TemporaryDirectory() as tmp:
+                run = Path(tmp) / "run"
+                run.mkdir()
+                log = run / "stage1_current.log"
+                log.touch()
+                if artifact == "checkpoints":
+                    (run / artifact).mkdir()
+                else:
+                    (run / artifact).touch()
+                env = {"LINGBOT_TRAIN_RUN_DIR": str(run), "LINGBOT_TRAIN_RUN_ID": "current",
+                       "TRAIN_LOG_FILE": str(log)}
+                with patch.dict("os.environ", env, clear=True):
+                    with self.assertRaisesRegex(ValueError, "new output directory"):
+                        freeze_normalization(self.stats_file, run, 548893)
+                self.assertFalse((run / "normalization").exists())
+
+    def test_snapshot_rejects_unowned_log_directory(self):
+        with TemporaryDirectory() as tmp:
+            run = Path(tmp) / "run"
+            run.mkdir()
+            log = run / "stage1_current.log"
+            log.touch()
+            env = {"LINGBOT_TRAIN_RUN_DIR": str(run), "LINGBOT_TRAIN_RUN_ID": "current",
+                   "TRAIN_LOG_FILE": str(log)}
+            for missing in env:
+                with self.subTest(missing=missing):
+                    incomplete = {key: value for key, value in env.items() if key != missing}
+                    with patch.dict("os.environ", incomplete, clear=True):
+                        with self.assertRaisesRegex(ValueError, "new output directory"):
+                            freeze_normalization(self.stats_file, run, 548893)
+            with patch.dict("os.environ", {**env, "LINGBOT_TRAIN_RUN_DIR": str(run.parent)}, clear=True):
+                with self.assertRaisesRegex(ValueError, "new output directory"):
+                    freeze_normalization(self.stats_file, run, 548893)
+
     def test_inference_refuses_wrong_override_or_corrupted_snapshot(self):
         with TemporaryDirectory() as tmp:
             run = Path(tmp) / "run"

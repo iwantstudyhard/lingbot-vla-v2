@@ -3,6 +3,7 @@
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 
 
@@ -47,10 +48,20 @@ def freeze_normalization(source, output, expected_count, allow_existing=False):
         if not snapshot.exists() or semantic_hash(json.loads(snapshot.read_bytes())) != fingerprint:
             raise ValueError("Saved normalization snapshot missing or corrupted")
         return {**manifest, "path": str(snapshot)}
-    output_path = Path(output)
+    output_path = Path(output).resolve()
     if allow_existing and (output_path / "checkpoints").exists():
         raise ValueError("Cannot resume an old run without an audited normalization contract")
-    if output_path.exists() and any(output_path.iterdir()) and not (output_path / "stage2_run.json").exists():
+    # train.sh exclusively creates the fresh run and its log before torchrun.
+    launch_directory = os.environ.get("LINGBOT_TRAIN_RUN_DIR")
+    launch_log = os.environ.get("TRAIN_LOG_FILE")
+    launcher_owned = (
+        launch_directory and Path(launch_directory).resolve() == output_path
+        and launch_log and os.environ.get("LINGBOT_TRAIN_RUN_ID")
+        and output_path.is_dir()
+        and all(path == Path(launch_log).resolve() and path.is_file() for path in output_path.iterdir())
+    )
+    if (output_path.exists() and any(output_path.iterdir()) and not launcher_owned
+            and not (output_path / "stage2_run.json").exists()):
         raise ValueError("Fresh clean training requires a new output directory")
     directory.mkdir(parents=True, exist_ok=True)
     snapshot.write_bytes(raw)
