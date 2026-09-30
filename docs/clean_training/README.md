@@ -29,18 +29,20 @@
 
 ```bash
 cd /path/to/lingbot-vla-v2
-bash tools/train_clean_stage1.sh --gpus 0,1,2,3 --dry-run
+bash tools/train_clean_stage1.sh --gpus 0 --dry-run
 # 所有检查通过后执行：
-bash tools/train_clean_stage1.sh --gpus 0,1,2,3
+bash tools/train_clean_stage1.sh --gpus 0
 ```
 
-配置：BF16，4 卡，micro batch=1，accumulation=8，global batch=32；基础 LR=1e-5、cosine 至1e-6、3% warmup；max_steps=18000。这是 optimizer step，不是18000个 epoch。548893/32 约17153步一个完整样本遍历，drop_last/分片会使实际略有差异；不能据此保证已经收敛。
+默认配置：BF16，1 卡，micro batch=1，accumulation=32，global batch=32；基础 LR=1e-5、cosine 至1e-6、3% warmup；max_steps=18000。这是 optimizer step，不是18000个 epoch。548893/32 约17153步一个完整样本遍历，drop_last/分片会使实际略有差异；不能据此保证已经收敛。
+
+`--gpus` 默认 `0`，也支持多卡及不连续编号列表，例如 `0,1`、`1,3,5,7`。启动器不调整批量参数；更换卡数时手动修改 YAML，满足 `global_batch_size = micro_batch_size × data_parallel_size × gradient_accumulation_steps`。当前阶段一的数据并行卡数等于列表长度。保持 micro=1、global=32 时，1/2/4/8 卡分别需要 accumulation=32/16/8/4；详细示例见 [使用流程](../usage.md#4-阶段一建立-clean-基线)。训练初始化会拒绝不匹配的值，`--dry-run` 不执行这项训练初始化检查。
 
 视觉塔、语言/动作模型可训练：`freeze_vision_encoder=false, freeze_vit=false, train_expert_only=false`；depth/video teacher 不训练。动作 horizon 仍50，不因为评测执行前10个动作而缩短训练 horizon。
 
 每500步保存，完成后保留最多3个，包括窗口平均训练总 loss 最低的检查点与其余最新检查点。它不是评测成功率最好的模型。异步HF导出保护正在读取的 checkpoint，写新模型/临时HF文件期间可能短暂超过3个目录，磁盘应预留一次写入的空间。图表不随旧权重淘汰。
 
-短训练先用 `bash tools/train_clean_stage1.sh --gpus 0,1,2,3 --smoke`。它在新目录显式设置5步/第5步保存，确认统计日志、mask、实际解码、checkpoint和图表后，再运行不带smoke的正式命令。这样的小运行不能作为收敛模型，也不能作为正式训练目录继续恢复。
+短训练先用 `bash tools/train_clean_stage1.sh --gpus 0 --smoke`。它在新目录显式设置5步/第5步保存，不自动调整批量参数；确认统计日志、mask、实际解码、checkpoint和图表后，再运行不带smoke的正式命令。这样的小运行不能作为收敛模型，也不能作为正式训练目录继续恢复。
 
 ## 第一阶段中断恢复
 
@@ -49,11 +51,13 @@ bash tools/train_clean_stage1.sh --gpus 0,1,2,3
 ```bash
 bash tools/train_clean_stage1.sh \
   --resume-run outputs/train_outputs/robotwin_clean_stage1_<run_id> \
-  --gpus 0,1,2,3 --dry-run
+  --gpus 0 --dry-run
 # 核对后去掉 --dry-run
 ```
 
 读取该运行保存的 `lingbotvla_cli.yaml`，恢复模型、optimizer、scheduler、dataloader与代码原有 RNG 状态；自动尝试最新到更早 DCP checkpoint。没有有效 checkpoint 则报错，不悄悄从零开始。运行目录被移动需要显式迁移有效配置中的路径，不建议运行中重构代码。中断至最近保存步之间的训练不可恢复。
+
+上述示例对应默认单卡运行。恢复时的 GPU 数量必须与运行保存的批量参数匹配，修改仓库里的默认 YAML 不会更改该运行的保存配置。
 
 当前不新增跨机器/不同world size的严格确定性续训承诺，也没有完整重写所有worker/CUDA RNG恢复机制。
 

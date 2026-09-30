@@ -64,7 +64,7 @@ def main():
     parser.add_argument("--init-hf", help="Optional relocated OFFICIAL pretrained initialization")
     parser.add_argument("--output-dir")
     parser.add_argument("--resume-run", help="Only a new audited stage1 run, never the historical mixed-stat run")
-    parser.add_argument("--gpus", default="0")
+    parser.add_argument("--gpus", default="0", help="Comma-separated GPU IDs; manually match batch settings in YAML (default: 0)")
     parser.add_argument("--master-port", type=int, default=62500)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--smoke", action="store_true", help="NEW 5-step/5-save verification run; never a formal baseline")

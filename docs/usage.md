@@ -159,16 +159,35 @@ python tools/verify_clean_norm.py \
 ```bash
 # 只核验输入并打印启动命令，不启动训练
 bash tools/train_clean_stage1.sh \
-  --init-hf models/lingbot-vla-v2-6b --gpus 0,1,2,3 --dry-run
+  --init-hf models/lingbot-vla-v2-6b --gpus 0 --dry-run
 # 实际运行 5 步，检查解码、checkpoint 和图表
 bash tools/train_clean_stage1.sh \
-  --init-hf models/lingbot-vla-v2-6b --gpus 0,1,2,3 --smoke
+  --init-hf models/lingbot-vla-v2-6b --gpus 0 --smoke
 # 正式训练：每次启动生成新的运行目录
 bash tools/train_clean_stage1.sh \
-  --init-hf models/lingbot-vla-v2-6b --gpus 0,1,2,3
+  --init-hf models/lingbot-vla-v2-6b --gpus 0
 ```
 
 配置为 `configs/vla/robotwin/robotwin_clean_stage1.yaml`：默认 BF16、全局 batch 32、18000 个 optimizer steps，每 500 步保存，最终最多保留 3 个 checkpoint。它从 foundation 权重初始化；5 步 smoke 是独立小实验，不作为正式基线继续恢复。
+
+`--gpus` 使用逗号分隔的 GPU 编号列表，默认 `0`。例如 `--gpus 0,1` 使用两卡，`--gpus 1,3,5,7` 使用四卡；训练进程数由列表长度决定。空列表、重复编号和非法编号会报错。
+
+启动器不自动修改批量参数。改变卡数后，需要手动修改 YAML 中的 `micro_batch_size`、`gradient_accumulation_steps`、`global_batch_size`，满足：
+
+```text
+global_batch_size = micro_batch_size × data_parallel_size × gradient_accumulation_steps
+```
+
+当前阶段一使用单机纯数据并行，`data_parallel_size` 等于所选 GPU 数量。保持 `micro_batch_size=1`、`global_batch_size=32` 时：
+
+| GPU 数量 | `gradient_accumulation_steps` |
+|---|---:|
+| 1（默认） | 32 |
+| 2 | 16 |
+| 4 | 8 |
+| 8 | 4 |
+
+不匹配时，训练初始化会报错并列出配置值与计算结果。`--dry-run` 只核验输入并打印命令，不执行训练初始化，因此不能代替批量匹配检查；`--smoke` 也不会自动调整批量参数。
 
 显式 `--init-hf` 可避免已有 `MODEL_DIR`（可能指向评测权重）覆盖阶段一初始化。记下启动时打印的运行目录：
 
@@ -180,13 +199,15 @@ STAGE1_RUN="$OUTPUT_DIR/train_outputs/robotwin_clean_stage1_<run_id>"
 
 ```bash
 bash tools/train_clean_stage1.sh \
-  --resume-run "$STAGE1_RUN" --gpus 0,1,2,3 --dry-run
+  --resume-run "$STAGE1_RUN" --gpus 0 --dry-run
 # 检查通过后恢复
 bash tools/train_clean_stage1.sh \
-  --resume-run "$STAGE1_RUN" --gpus 0,1,2,3
+  --resume-run "$STAGE1_RUN" --gpus 0
 ```
 
 恢复模型、optimizer、scheduler 等已保存状态；仅支持当前带归一化契约的新阶段一运行。
+
+恢复时读取该运行保存的 `lingbotvla_cli.yaml`，不是仓库里的默认 YAML；`--gpus` 必须与保存配置中的批量参数匹配。以上恢复示例对应默认单卡运行。
 
 ## 5. 阶段一评测与 checkpoint 选择
 
