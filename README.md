@@ -10,6 +10,8 @@
 
 ## 本分支的竞赛训练入口
 
+从环境准备到训练、恢复和评测的常用命令见 [简明使用流程](docs/usage.md)。
+
 官方正文保留作参考。仅使用官方 clean demonstrations 的本地流程请看
 [两阶段训练指南](docs/clean_training/README.md)；
 全部本地修改、历史归一化问题和重构注意事项见
