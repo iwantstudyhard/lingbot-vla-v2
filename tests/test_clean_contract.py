@@ -1,6 +1,8 @@
 """Normalization, clean-source and launcher regression tests (CPU only)."""
 
 from copy import deepcopy
+import ast
+import inspect
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -17,6 +19,7 @@ from tools.verify_clean_norm import chunk_weights, weighted_stats
 from tools.clean_training_common import REPO_ROOT, preflight, environment, validate_hf
 from tools.launch_clean_stage1 import prepare_command as stage1_command
 from extensions.clean_stage2.launch import prepare_command as stage2_command
+from lingbotvla.utils.arguments import workspace_path
 
 
 class CleanContractTests(unittest.TestCase):
@@ -132,6 +135,51 @@ class CleanContractTests(unittest.TestCase):
 
     def test_semantic_hash_independent_of_json_format(self):
         self.assertEqual(semantic_hash(self.stats), semantic_hash(json.loads(json.dumps(self.stats, indent=4))))
+
+    def test_dataset_reader_and_metadata_share_local_root(self):
+        # Execute the real constructor without importing GPU/LeRobot dependencies.
+        source = REPO_ROOT / "lingbotvla/data/vla_data/base_dataset.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        names = {"_resolve_lerobot_location", "_filter_supported_kwargs", "VLADataset"}
+        tree.body = [node for node in tree.body
+                     if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names]
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            local = workspace / "datasets/RoboTwin_lerobot_v30"
+            cache = workspace / "cache"
+            remote = "example/robot_dataset"
+            for root in (local, cache / remote):
+                (root / "meta").mkdir(parents=True)
+                (root / "meta/info.json").write_text('{"fps":20}', encoding="utf-8")
+
+            class FixtureReader:
+                def __init__(self, repo_id, root=None, **kwargs):
+                    self.repo_id = repo_id
+                    self.root = Path(root) if root is not None else cache / repo_id
+                    self.info = json.loads((self.root / "meta/info.json").read_bytes())
+                    self.fps = self.info["fps"]
+
+            namespace = {"Path": Path, "inspect": inspect, "workspace_path": workspace_path,
+                         "Dataset": object, "Resize": lambda size: size,
+                         "LeRobotDatasetMetadata": FixtureReader, "LeRobotDataset": FixtureReader}
+            exec(compile(tree, str(source), "exec"), namespace)
+            transform = SimpleNamespace(actions=[], states=[], images=[], actions_convert_from_state=[],
+                                        org_features={"actions": [], "states": [], "images": []})
+            cases = (("datasets/RoboTwin_lerobot_v30", local, local.name),
+                     ("./datasets/RoboTwin_lerobot_v30", local, local.name),
+                     (str(local), local, local.name),
+                     (remote, cache / remote, remote))
+            with patch.dict("os.environ", {"WORKSPACE": str(workspace)}, clear=True):
+                for repo_id, expected_root, expected_id in cases:
+                    with self.subTest(repo_id=repo_id):
+                        dataset = namespace["VLADataset"](
+                            repo_id, "robotwin", SimpleNamespace(), "configs/robot_configs",
+                            config=SimpleNamespace(), feature_transform=transform,
+                        )
+                        self.assertEqual(dataset.dataset_meta.root, expected_root)
+                        self.assertEqual(dataset.dataset.root, expected_root)
+                        self.assertEqual(dataset.dataset.repo_id, expected_id)
+                        self.assertEqual(dataset.dataset.info, dataset.dataset_meta.info)
 
     def test_source_metadata_and_all_camera_segments(self):
         root = Path("D:/Google下载/RoboTwin_lerobot_v30/RoboTwin_lerobot_v30")

@@ -217,7 +217,8 @@ class VLADataset(Dataset):
         merged_delta = {**self.get_delta_timestamps(), **self.get_video_delta_timestamps()}
 
         self.dataset = LeRobotDataset(
-            repo_id=repo_id,
+            repo_id=lerobot_repo_id,
+            root=lerobot_root,
             image_transforms=Resize(image_size),
             delta_timestamps=merged_delta,
             load_image=load_image,
