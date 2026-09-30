@@ -96,8 +96,8 @@ def preflight(config, repo_root=REPO_ROOT):
 
 def environment(gpus, port):
     devices = [value.strip() for value in gpus.split(",")]
-    if len(devices) != 4 or len(set(devices)) != 4 or not all(value.isdigit() for value in devices):
-        raise ValueError("Current configuration requires four distinct GPUs: micro=1, accumulation=8, global=32")
+    if len(devices) != 1 or not all(value.isdigit() for value in devices):
+        raise ValueError("Current configuration requires one GPU: micro=1, accumulation=32, global=32")
     if not 1 <= port <= 65535:
         raise ValueError("Invalid master port")
     env = os.environ.copy()

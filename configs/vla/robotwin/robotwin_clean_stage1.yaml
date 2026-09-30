@@ -80,11 +80,11 @@ train:
   max_action_dim: 55
   max_state_dim: 55
 
-  # BF16 is retained for the 4 x 48GB setup. micro_batch_size controls peak
-  # device memory; gradient accumulation raises the effective global batch.
+  # BF16 is retained for single-GPU training. Accumulate 32 micro-batches
+  # to preserve the effective global batch of the original four-GPU setup.
   enable_fp32: false
   micro_batch_size: 1
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 32
   global_batch_size: 32
 
   # Conservative small-batch fine-tuning schedule. 18k optimizer steps is
