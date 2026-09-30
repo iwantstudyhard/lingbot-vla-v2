@@ -40,7 +40,11 @@ from lingbotvla.optim import build_lr_scheduler, build_muon_optimizer, build_opt
 from lingbotvla.optim import build_flex_shard_dist_muon_optimizer
 from lingbotvla.utils import helper
 from lingbotvla.utils.async_hf_checkpoint import AsyncHFCheckpointSaver
-from lingbotvla.utils.checkpoint_retention import prune_old_checkpoints
+from lingbotvla.utils.checkpoint_retention import (
+    best_checkpoint_path,
+    prune_old_checkpoints,
+    update_best_checkpoint_record,
+)
 from lingbotvla.utils.training_metrics import AsyncTrainingMetricsWriter, build_visualization_run_dir
 from lingbotvla.utils.arguments import EvalArguments, DataArguments, ModelArguments, TrainingArguments, parse_args, save_args
 from lingbotvla.utils.dist_utils import all_reduce
@@ -126,6 +130,15 @@ def get_moe_param_groups(model: "torch.nn.Module", args_train) -> Optional[List[
 
 @dataclass
 class MyTrainingArguments(TrainingArguments):
+    keep_best_checkpoint: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Protect the checkpoint with the lowest mean total training loss "
+                "measured between consecutive checkpoint saves."
+            )
+        },
+    )
     enable_training_visualization: bool = field(
         default=True,
         metadata={"help": "Write structured metrics and render plots after every checkpoint."},
@@ -722,6 +735,9 @@ def main():
     start_epoch, start_step, global_step = 0, 0, 0
     current_epoch_for_eval, current_epoch_step_for_eval = 1, 0
     save_checkpoint_path = None
+    checkpoint_loss_sum = 0.0
+    checkpoint_loss_count = 0
+    checkpoint_loss_window_start_step = 1
     hf_failure_log_path = (
         os.path.join(args.train.save_checkpoint_path, "async_hf_failures.jsonl")
         if args.train.save_checkpoint_path
@@ -838,18 +854,66 @@ def main():
             epoch_step=epoch_step,
         )
 
+    def update_best_checkpoint_after_save(step: int) -> None:
+        """Record the lower-is-better mean loss for the just-saved interval."""
+        nonlocal checkpoint_loss_sum, checkpoint_loss_count, checkpoint_loss_window_start_step
+
+        if args.train.global_rank == 0 and args.train.keep_best_checkpoint:
+            if checkpoint_loss_count <= 0:
+                logger.warning(
+                    f"Cannot score global_step_{step} as best: no loss samples were collected."
+                )
+            else:
+                mean_loss = checkpoint_loss_sum / checkpoint_loss_count
+                try:
+                    record, changed = update_best_checkpoint_record(
+                        args.train.save_checkpoint_path,
+                        step=step,
+                        metric_value=mean_loss,
+                        window_start_step=checkpoint_loss_window_start_step,
+                        window_end_step=step,
+                    )
+                    if changed:
+                        logger.info_rank0(
+                            f"New best checkpoint: global_step_{step}, "
+                            f"mean training loss={mean_loss:.8f} over "
+                            f"steps {checkpoint_loss_window_start_step}-{step}."
+                        )
+                    else:
+                        logger.info_rank0(
+                            f"Best checkpoint remains global_step_{record['step']} "
+                            f"(mean training loss={record['metric_value']:.8f}); "
+                            f"global_step_{step} scored {mean_loss:.8f}."
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        f"Checkpoint global_step_{step} is valid, but best-checkpoint "
+                        f"tracking failed: {exc}"
+                    )
+        dist.barrier()
+        checkpoint_loss_sum = 0.0
+        checkpoint_loss_count = 0
+        checkpoint_loss_window_start_step = step + 1
+
     def prune_old_checkpoints_and_sync() -> None:
-        """Keep only the configured newest checkpoints after a completed save."""
+        """Keep the best checkpoint plus the newest snapshots within the limit."""
         max_to_keep = args.train.max_checkpoints_to_keep
         if max_to_keep <= 0:
             return
         dist.barrier()
         if args.train.global_rank == 0:
             try:
+                protected_paths = list(hf_saver.active_checkpoint_paths())
+                preferred_paths = []
+                if args.train.keep_best_checkpoint:
+                    best_path = best_checkpoint_path(args.train.save_checkpoint_path)
+                    if best_path is not None:
+                        preferred_paths.append(best_path)
                 removed = prune_old_checkpoints(
                     args.train.save_checkpoint_path,
                     max_to_keep,
-                    protected_paths=hf_saver.active_checkpoint_paths(),
+                    protected_paths=protected_paths,
+                    preferred_paths=preferred_paths,
                 )
                 for checkpoint_path in removed:
                     logger.info_rank0(
@@ -920,6 +984,10 @@ def main():
             logger.info_rank0("Starting training from scratch. No valid checkpoint could be loaded.")
     else:
         logger.info_rank0("Starting training from scratch.")
+
+    # A resumed run starts a fresh best-checkpoint averaging window immediately
+    # after the restored checkpoint. The historical best record remains on disk.
+    checkpoint_loss_window_start_step = global_step + 1
 
     helper.empty_cache()
     model_fwd_context, model_bwd_context = build_activation_offloading_context(
@@ -1144,6 +1212,8 @@ def main():
             total_depth_loss = total_depth_loss / depth_loss_weight
             total_future_depth_loss = total_future_depth_loss / future_depth_loss_weight
             total_future_video_loss = total_future_video_loss / future_video_loss_weight
+            checkpoint_loss_sum += float(total_loss)
+            checkpoint_loss_count += 1
             torch.cuda.synchronize()
             delta_time = time.time() - start_time
             all_lrs = lr_scheduler.get_last_lr()
@@ -1398,6 +1468,7 @@ def main():
                 Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
                 dist.barrier()
                 logger.info_rank0(f"Distributed checkpoint saved at {save_checkpoint_path} successfully!")
+                update_best_checkpoint_after_save(global_step)
                 render_checkpoint_visuals_and_sync(global_step)
                 save_hf_checkpoint_best_effort(
                     save_checkpoint_path,
@@ -1439,6 +1510,7 @@ def main():
                 Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
                 dist.barrier()
                 logger.info_rank0(f"Distributed checkpoint saved at {save_checkpoint_path} successfully!")
+                update_best_checkpoint_after_save(global_step)
                 render_checkpoint_visuals_and_sync(global_step)
                 save_hf_checkpoint_best_effort(
                     save_checkpoint_path,
@@ -1467,6 +1539,7 @@ def main():
             Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
             dist.barrier()
             logger.info_rank0(f"Distributed checkpoint saved at {save_checkpoint_path} successfully!")
+            update_best_checkpoint_after_save(global_step)
             render_checkpoint_visuals_and_sync(global_step)
             save_hf_checkpoint_best_effort(
                 save_checkpoint_path,
