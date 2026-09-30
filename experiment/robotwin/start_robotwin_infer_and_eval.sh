@@ -461,14 +461,14 @@ echo -e "\033[32m========== Starting sim side (queue-scheduled, ${num_slots} con
 cd "$eval_workdir" || { echo -e "\033[31mError: sim workdir ${eval_workdir} missing\033[0m"; exit 1; }
 
 # ===== Ensure the lingbot eval client is present under RoboTwin/script =====
-# Keep the existing RoboTwin-side client synchronization.
-eval_client_src="${inference_workdir}/experiment/robotwin/eval_policy_client_lingbotvla.py"
+# The eval client resolves its ../task_config relative to its own location, so it
+# must live at <RoboTwin>/script/ for _camera_config.yml to be found.
+eval_client_src="${inference_workdir}experiment/robotwin/eval_policy_client_lingbotvla.py"
 eval_client_dst="${eval_workdir}/script/eval_policy_client_lingbotvla.py"
 if [ ! -f "$eval_client_src" ]; then
     echo -e "\033[31mError: eval client source not found: ${eval_client_src}\033[0m"
     exit 1
 fi
-mkdir -p "$(dirname "$eval_client_dst")"
 if [ ! -f "$eval_client_dst" ] || ! cmp -s "$eval_client_src" "$eval_client_dst"; then
     echo -e "\033[36mSyncing eval client -> ${eval_client_dst}\033[0m"
     cp "$eval_client_src" "$eval_client_dst"
@@ -478,7 +478,7 @@ fi
 # The eval client does `from script.deploy.websocket_client_policy import WebsocketClientPolicy`,
 # which pulls in a sibling msgpack_numpy. Keep the RoboTwin-side copies in sync
 # with this inference checkout so an older helper cannot silently survive a pull.
-deploy_pkg_src="${inference_workdir}/deploy"
+deploy_pkg_src="${inference_workdir}deploy"
 deploy_pkg_dst="${eval_workdir}/script/deploy"
 mkdir -p "$deploy_pkg_dst"
 for f in __init__.py websocket_client_policy.py msgpack_numpy.py; do
@@ -496,7 +496,7 @@ done
 # Two artifacts embed absolute paths and go stale when RoboTwin is moved to a
 # new directory (both would break the curobo planner at sim start):
 #   (1) assets/embodiments/*/curobo*.yml -- urdf_path / collision_spheres
-#       (regenerated from *_tmp.yml templates via scripts/update_embodiment_config_path.py)
+#       (regenerated from *_tmp.yml templates via script/update_embodiment_config_path.py)
 #   (2) the editable-install .pth in the RoboTwin conda env pointing at envs/curobo/src
 # Both checks are idempotent: only act when the embedded path != current location.
 _eval_resolved="$(pwd -P)"   # physical path of this RoboTwin checkout (after cd)
@@ -504,7 +504,7 @@ _rep_yml="assets/embodiments/aloha-agilex/curobo_left.yml"
 if [ -f "$_rep_yml" ] && ! grep -qF "${_eval_resolved}/assets" "$_rep_yml" 2>/dev/null; then
     echo -e "\033[36mCurobo yml paths stale -> regenerating for ${_eval_resolved}\033[0m"
     ( source ${conda_sh} && conda activate ${sim_env} \
-      && python scripts/update_embodiment_config_path.py ) \
+      && python script/update_embodiment_config_path.py ) \
       || { echo -e "\033[31mError: curobo path regeneration failed\033[0m"; exit 1; }
 fi
 _env_site="$( source ${conda_sh} && conda activate ${sim_env} \
@@ -577,7 +577,7 @@ launch_task() {
     PYTHONWARNINGS=ignore::UserWarning \
     XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
     SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 \
-    setsid bash -c "source ${conda_sh} && conda activate ${sim_env} && export PYTHONPATH=\"\$(python -c 'import site;print(site.getsitepackages()[0])')\${PYTHONPATH:+:\$PYTHONPATH}\" && PYTHONUNBUFFERED=1 PYTHONWARNINGS=ignore::UserWarning XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 python -u ${eval_client_dst} --config '${eval_workdir}/XPolicyLab/policy/${policy_name}/deploy.yml' \
+    setsid bash -c "source ${conda_sh} && conda activate ${sim_env} && export PYTHONPATH=\"\$(python -c 'import site;print(site.getsitepackages()[0])')\${PYTHONPATH:+:\$PYTHONPATH}\" && PYTHONUNBUFFERED=1 PYTHONWARNINGS=ignore::UserWarning XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 python -u ${eval_client_dst} --config policy/${policy_name}/deploy_policy.yml \
         --overrides \
         --task_name ${task_name} \
         --task_config ${task_config} \
