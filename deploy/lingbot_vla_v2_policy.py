@@ -224,6 +224,8 @@ class LingbotVLAv2Server:
         self.global_step = 0
         self.last_action_chunk = None
         self.last_normalized_action_chunk = None
+        self._last_full_diagnostics = None
+        self.checkpoint_path = str(workspace_path(path_to_pi_model))
         self.use_bf16 = use_bf16
         self.use_fp32 = use_fp32
         self.action_key: str= "action"
@@ -275,6 +277,7 @@ class LingbotVLAv2Server:
 
     def load_vla(self, path_to_pi_model) -> LingbotVlaV2Policy:
         path_to_pi_model = str(workspace_path(path_to_pi_model))
+        self.checkpoint_path = path_to_pi_model
         print(f"loading model from: {path_to_pi_model}")
         
         # load training config
@@ -282,6 +285,7 @@ class LingbotVLAv2Server:
         with open(training_config_path, 'r') as f:
             training_config = yaml.safe_load(f)
         f.close()
+        self.training_config = training_config
 
         # update model config according to training config
         training_model_config = training_config['model']
@@ -358,6 +362,7 @@ class LingbotVLAv2Server:
         self.global_step = 0
         self.last_action_chunk = None
         self.last_normalized_action_chunk = None
+        self._last_full_diagnostics = None
 
         robot_config = str(workspace_path(f'configs/robot_configs/{robo_name}.yaml'))
         
@@ -441,9 +446,10 @@ class LingbotVLAv2Server:
             return torch.stack(padded, dim=0)
 
         raise ValueError(f"Cannot batch tensors with different shapes: {shapes}")
-    def _infer_batch(self, observations, return_normalized=False):
+    def _infer_batch(self, observations, return_normalized=False, return_diagnostics=False):
         if not isinstance(observations, (list, tuple)) or len(observations) == 0:
             raise ValueError("batch observation must be a non-empty list")
+        started = time.monotonic()
         applied = [self._prepare_model_input(obs) for obs in observations] # bsize, dict{key }
         batch_observation = {}
         for key in applied[0].keys():
@@ -454,6 +460,16 @@ class LingbotVLAv2Server:
             else:
                 batch_observation[key] = values
 
+        preprocess_ms = (time.monotonic() - started) * 1000
+        diagnostic_arrays = {}
+        if return_diagnostics:
+            # Snapshot before sample_actions_batch changes the BF16 state dtype.
+            for key in ('state', 'state_joint_mask', 'action_joint_mask', 'lang_tokens', 'lang_masks'):
+                diagnostic_arrays[key] = batch_observation[key].detach().cpu().to(
+                    dtype=torch.float32 if batch_observation[key].is_floating_point() else batch_observation[key].dtype
+                ).numpy().copy()
+            diagnostic_arrays['input_state'] = np.stack([obs['observation.state'] for obs in observations])
+        sample_start = time.monotonic()
         actions = self.vla.sample_actions_batch(
             batch_observation,
             self.use_bf16,
@@ -462,12 +478,23 @@ class LingbotVLAv2Server:
             sample_compile_fn = self.sample_actions_fn,
         )
         
+        sample_ms = (time.monotonic() - sample_start) * 1000
+        unapply_start = time.monotonic()
         unnormalized_actions = self._unapply_batched_actions(applied, actions)
+        unapply_ms = (time.monotonic() - unapply_start) * 1000
+        if return_diagnostics:
+            diagnostic_arrays['normalized_actions'] = actions.detach().cpu().numpy().copy()
+            for key, value in unnormalized_actions.items():
+                diagnostic_arrays[f'full_{key}'] = np.array(value, copy=True)
+            return unnormalized_actions, actions, {
+                'arrays': diagnostic_arrays, 'available': True,
+                'timing': {'preprocess_ms': preprocess_ms, 'sample_ms': sample_ms, 'unapply_ms': unapply_ms},
+            }
         if return_normalized:
             return unnormalized_actions, actions
         return unnormalized_actions
         
-    def infer(self, observation, center_crop=True, return_normalized=False):
+    def infer(self, observation, center_crop=True, return_normalized=False, return_diagnostics=False):
         """Generates an action with the VLA policy."""
         # (If trained with image augmentations) Center crop image and then resize back up to original size.
         # IMPORTANT: Let's say crop scale == 0.9. To get the new height and width (post-crop), multiply
@@ -489,7 +516,15 @@ class LingbotVLAv2Server:
         )
 
         if should_forward:
-            if return_normalized:
+            self._last_full_diagnostics = None
+            if return_diagnostics:
+                unnormalized_actions, normalized_actions, self._last_full_diagnostics = self._infer_batch(
+                    observations, return_diagnostics=True,
+                )
+                if not return_normalized:
+                    # Diagnostics must not populate a cache the ordinary call would leave empty.
+                    normalized_actions = None
+            elif return_normalized:
                 unnormalized_actions, normalized_actions = self._infer_batch(
                     observations,
                     return_normalized=True,
@@ -532,10 +567,51 @@ class LingbotVLAv2Server:
         if return_normalized:
             result = dict(result)
             result["_normalized_actions"] = normalized_action
+        if return_diagnostics:
+            result = dict(result)
+            diagnostic = dict(self._last_full_diagnostics or {'arrays': {}, 'available': False, 'timing': {}})
+            diagnostic['arrays'] = dict(diagnostic['arrays'])
+            for key in self.action_key:
+                diagnostic['arrays'][f'returned_{key}'] = np.array(result[key], copy=True)
+            diagnostic.update(model_forward=should_forward, policy_step=self.global_step,
+                              selected_step=None if self.chunk_ret else self.global_step % self.use_length)
+            if not should_forward:
+                diagnostic['timing'] = {}  # Cached prediction timings are not a new forward.
+            result['_diagnostics'] = diagnostic
 
         self.global_step += 1
         
         return result
+
+    def infer_with_diagnostics(self, observation):
+        """Capture the existing forward; never run a second sampling pass."""
+        return self.infer(observation, return_diagnostics=True)
+
+    def evaluation_metadata(self):
+        from .eval_logging import environment_info, json_value
+
+        transform = self.vla.feature_transform
+        return json_value({
+            'checkpoint': self.checkpoint_path,
+            'weight_files': [{'name': path.name, 'size': path.stat().st_size,
+                              'mtime_ns': path.stat().st_mtime_ns}
+                             for path in sorted(Path(self.checkpoint_path).glob('*.safetensors'))],
+            'training_config': self.training_config,
+            'model_config': self.config.to_dict(), 'robot_config': self.robot_config,
+            'normalization_path': self.robot_norm_path,
+            'normalization_types': transform.normalizer.norm_type if transform.normalizer else {},
+            'features': {'states': transform.states, 'actions': transform.actions,
+                         'joints': transform.feature_config.joints,
+                         'joints_max_dim': transform.feature_config.joints_max_dim},
+            'use_bf16': self.use_bf16, 'use_fp32': self.use_fp32,
+            'actual_precision': 'bfloat16' if self.use_bf16 else 'float32',
+            'gpu': {'name': torch.cuda.get_device_properties(0).name,
+                    'total_memory': torch.cuda.get_device_properties(0).total_memory,
+                    'cuda_version': torch.version.cuda},
+            'use_compile': self.use_compile, 'use_length': self.use_length, 'chunk_ret': self.chunk_ret,
+            'service_seed': 42, 'seed_policy': 'Seeded once at module import; reset does not reseed',
+            'environment': environment_info(),
+        })
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -600,6 +676,8 @@ def main():
         default=True,
     )
 
+    parser.add_argument('--eval_run_dir', type=str, default=None)
+    parser.add_argument('--eval_slot', type=int, default=0)
     args = parser.parse_args()
 
     model = LingbotVLAv2Server(
@@ -610,7 +688,8 @@ def main():
         use_fp32=args.use_fp32,
         use_compile=args.use_compile,
     )
-    model_server = WebsocketPolicyServer(model, port=args.port)
+    model_server = WebsocketPolicyServer(model, port=args.port,
+                                        eval_run_dir=args.eval_run_dir, eval_slot=args.eval_slot)
     model_server.serve_forever()
 
 

@@ -123,14 +123,34 @@ defaults to **100 episodes per task** when `--num_episodes` is omitted.
 
 ### Output layout
 
+Full inference and execution tracing is enabled by default (`--eval_trace full`).
+See [evaluation logging and diagnostics](../../docs/eval_logging.md) for field definitions,
+retry selection, offline reports, and deployment validation. No extra images are captured.
+
 ```
 outputs/eval_outputs/<exp>_<step>k_<task_config>_<timestamp>/
 ├── stats.txt                 # final per-task table + overall success rate
+├── run_manifest.json         # resolved launch config, code versions and environment
+├── scheduler_events.jsonl    # dispatch, readiness, retries, exits and signals
+├── summary.json              # complete-attempt results and task coverage
 ├── inference_pids.txt
 ├── eval_pids.txt
 ├── inference_logs/           # one log per inference server / port
 ├── eval_logs/                # one log per task (per-step progress, success rate)
-└── eval_results/             # per-task videos: episodeN_success.mp4 ...
+├── eval_results/<task>/
+│   ├── task_summary.json
+│   ├── _result.txt           # compatibility rate for the selected complete attempt
+│   ├── task_config.jsonl
+│   ├── attempt_results.jsonl
+│   ├── seed_checks.jsonl
+│   ├── episode_results.jsonl
+│   └── episodes/episode_I_seed_S_attempt_N/
+│       ├── episode.json
+│       ├── inference.jsonl
+│       ├── execution.jsonl
+│       ├── predictions/request_R.npz  # full normalized + robot-space predictions
+│       └── episodeI_success.mp4       # or step_limit / exception / interrupted
+└── analysis/                 # offline HTML report, CSVs and action curves
 ```
 
 ### Useful flags
@@ -138,6 +158,7 @@ outputs/eval_outputs/<exp>_<step>k_<task_config>_<timestamp>/
 | flag | meaning |
 |------|---------|
 | `--no_video` | disable per-episode video recording (faster, no videos saved) |
+| `--eval_trace` | `full` (default) saves full predictions and per-action physical feedback; `off` keeps configs, lifecycle results and episode timing only |
 | `--keep_inference` | leave inference servers resident after sim finishes |
 | `--start_port` | base port for inference servers (default 9330, slot *i* uses base + i) |
 | `--num_episodes` | episodes evaluated per task (default 100; use 1 for a smoke test) |

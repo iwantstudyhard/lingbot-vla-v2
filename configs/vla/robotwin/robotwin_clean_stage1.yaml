@@ -80,8 +80,9 @@ train:
   max_action_dim: 55
   max_state_dim: 55
 
-  # BF16 is retained for single-GPU training. Accumulate 32 micro-batches
-  # to preserve the effective global batch of the original four-GPU setup.
+  # Default: one GPU, micro=1, accumulation=32, global=32. When changing
+  # --gpus, manually match global = micro * data_parallel_size * accumulation.
+  # The launcher does not adjust batch settings; training rejects mismatches.
   enable_fp32: false
   micro_batch_size: 1
   gradient_accumulation_steps: 32

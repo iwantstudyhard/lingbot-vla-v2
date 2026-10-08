@@ -1028,6 +1028,14 @@ def parse_args(rootclass: T) -> T:
                 # Skip list fields with None values to use default
                 if f"{base}.{arg_name}" in list_fields and arg_value is None:
                     continue
+                # Preserve optional nulls instead of passing the literal string "null".
+                if arg_value is None:
+                    parser.set_defaults(**{f"{base}.{arg_name}": None})
+                    continue
+                # Empty saved lists cannot be emitted as CLI flags with nargs="+".
+                if f"{base}.{arg_name}" in list_fields and arg_value == []:
+                    parser.set_defaults(**{f"{base}.{arg_name}": []})
+                    continue
 
                 cmd_args.append(f"--{base}.{arg_name}")
                 if f"{base}.{arg_name}" in list_fields and isinstance(arg_value, list):

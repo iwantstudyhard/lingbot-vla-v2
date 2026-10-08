@@ -19,7 +19,7 @@ from tools.verify_clean_norm import chunk_weights, weighted_stats
 from tools.clean_training_common import REPO_ROOT, preflight, environment, validate_hf
 from tools.launch_clean_stage1 import prepare_command as stage1_command
 from extensions.clean_stage2.launch import prepare_command as stage2_command
-from lingbotvla.utils.arguments import workspace_path
+from lingbotvla.utils.arguments import TrainingArguments, workspace_path
 
 
 class CleanContractTests(unittest.TestCase):
@@ -218,9 +218,35 @@ class CleanContractTests(unittest.TestCase):
             self.assertEqual(sorted(path.name for path in root.iterdir() if path.is_dir()),
                              ["global_step_1500", "global_step_2000", "global_step_500"])
 
-    def test_environment_and_missing_shards(self):
-        with self.assertRaises(ValueError):
-            environment("0,0,1,2", 62500)
+    def test_environment_accepts_variable_gpu_counts(self):
+        for devices, expected in (("0", "0"), ("3", "3"), ("0,1", "0,1"),
+                                  ("1,3,5,7", "1,3,5,7"), (" 0, 2 ", "0,2"),
+                                  ("0,1,2,3,4,5,6,7", "0,1,2,3,4,5,6,7")):
+            with self.subTest(gpus=devices):
+                self.assertEqual(environment(devices, 62500)["CUDA_VISIBLE_DEVICES"], expected)
+
+    def test_environment_rejects_invalid_gpu_lists(self):
+        for devices in ("", " ", "0,0", "0,00", "0,0,1,2", "0,a", "-1", "0,", "0,,1", "０"):
+            with self.subTest(gpus=devices), self.assertRaisesRegex(ValueError, "--gpus"):
+                environment(devices, 62500)
+
+    def test_manual_batch_settings_match_gpu_count(self):
+        for count, accumulation in ((1, 32), (2, 16), (4, 8), (8, 4)):
+            with self.subTest(gpus=count), patch.dict("os.environ", {
+                "LOCAL_RANK": "0", "RANK": "0", "WORLD_SIZE": str(count),
+            }):
+                args = TrainingArguments(output_dir="outputs/test", max_steps=5, micro_batch_size=1,
+                                         gradient_accumulation_steps=accumulation, global_batch_size=32)
+                self.assertEqual(args.global_batch_size, 32)
+                self.assertEqual(args.gradient_accumulation_steps, accumulation)
+
+    def test_manual_batch_mismatch_reports_values(self):
+        with patch.dict("os.environ", {"LOCAL_RANK": "0", "RANK": "0", "WORLD_SIZE": "2"}):
+            with self.assertRaisesRegex(ValueError, r"global_batch_size.*32.*data_parallel_size.*2.*= 64"):
+                TrainingArguments(output_dir="outputs/test", max_steps=5, micro_batch_size=1,
+                                  gradient_accumulation_steps=32, global_batch_size=32)
+
+    def test_missing_weight_shards_fail(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "config.json").write_text("{}")
@@ -243,6 +269,48 @@ class CleanContractTests(unittest.TestCase):
             self.assertEqual(command[command.index("--train.enable_resume") + 1], "false")
             self.assertFalse(any("stage2" in value for value in command))
             self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0,1,2,3")
+            for name in ("--train.micro_batch_size", "--train.gradient_accumulation_steps", "--train.global_batch_size"):
+                self.assertNotIn(name, command)
+
+    def test_stage1_resume_accepts_checkpoint_writer_layout(self):
+        with TemporaryDirectory() as tmp:
+            run = Path(tmp) / "stage1"
+            record = freeze_normalization(self.stats_file, run, 548893)
+            config = yaml.safe_load((REPO_ROOT / "configs/vla/robotwin/robotwin_clean_stage1.yaml").read_text())
+            weights = Path(tmp) / "weights"
+            weights.mkdir()
+            (weights / "config.json").write_text("{}")
+            (weights / "model.safetensors").touch()
+            config["model"]["model_path"] = str(weights)
+            config["train"]["output_dir"] = str(run.resolve())
+            config["data"]["norm_stats_file"] = record["path"]
+            (run / "lingbotvla_cli.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+            checkpoint = run / "checkpoints/global_step_18000"
+            for component in ("model", "optimizer"):
+                directory = checkpoint / component
+                directory.mkdir(parents=True)
+                (directory / ".metadata").touch()
+            extra_state = checkpoint / "extra_state"
+            extra_state.mkdir()
+            (extra_state / "extra_state_rank_0.pt").touch()
+            args = SimpleNamespace(gpus="0,1,2,3", master_port=62500, resume_run=str(run),
+                                   init_hf=None, output_dir=None)
+
+            with patch("tools.launch_clean_stage1.preflight"):
+                command, _ = stage1_command(args)
+
+            self.assertEqual(command[command.index("--train.enable_resume") + 1], "true")
+            self.assertEqual(command[command.index("--train.output_dir") + 1], str(run.resolve()))
+            self.assertIn(str(run / "lingbotvla_cli.yaml"), command)
+
+            # HF exports and misplaced root metadata cannot establish DCP availability.
+            (checkpoint / "model/.metadata").unlink()
+            (checkpoint / ".metadata").touch()
+            hf = checkpoint / "hf_ckpt"
+            hf.mkdir()
+            (hf / "model.safetensors").touch()
+            with self.assertRaisesRegex(ValueError, "global_step_.*model/.metadata"):
+                stage1_command(args)
 
     def test_stage2_refuses_legacy_checkpoint(self):
         with TemporaryDirectory() as tmp:

@@ -91,6 +91,8 @@ if [[ "${RESUME}" != "1" || "${ENV_EXISTS}" != "1" ]]; then
 fi
 conda activate "${ENV_NAME}"
 
+conda install -c conda-forge "ffmpeg=6" -y
+
 python -m pip install -U pip setuptools wheel
 
 assert_torch_stack() {
@@ -166,6 +168,13 @@ import utils3d
 print("depth imports ok")
 PY
 python -m pip install huggingface_hub==0.34.0
+LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" python - <<'PY'
+import torch
+import torchcodec
+from torchcodec.decoders import VideoDecoder
+
+print("video decoder imports ok", "torch", torch.__version__, "torchcodec", torchcodec.__version__)
+PY
 if ! python -m pip check; then
   echo "[WARN] pip check reported dependency metadata issues." >&2
   echo "[WARN] lerobot and depth subpackages are installed with --no-deps intentionally to preserve training pins." >&2

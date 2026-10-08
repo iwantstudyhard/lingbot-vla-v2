@@ -1,44 +1,48 @@
-import sys
+# Simulator imports need the workspace bootstrap below.
+# ruff: noqa: E402
+import ast
 import os
-import subprocess
+import sys
 from pathlib import Path
 
-WORKSPACE = Path(os.path.expandvars(os.environ.get("WORKSPACE") or str(Path(__file__).resolve().parents[2]))).expanduser()
+
+WORKSPACE = Path(
+    os.path.expandvars(os.environ.get("WORKSPACE") or str(Path(__file__).resolve().parents[2]))
+).expanduser()
 if not WORKSPACE.is_absolute():
     WORKSPACE = Path(__file__).resolve().parents[2] / WORKSPACE
 WORKSPACE = WORKSPACE.resolve()
-robotwin_dir = Path(os.path.expandvars(os.environ.get("ROBOTWIN_DIR") or os.environ.get("EVAL_WORKDIR") or "RoboTwin")).expanduser()
+robotwin_dir = Path(
+    os.path.expandvars(os.environ.get("ROBOTWIN_DIR") or os.environ.get("EVAL_WORKDIR") or "RoboTwin")
+).expanduser()
 if not robotwin_dir.is_absolute():
     robotwin_dir = WORKSPACE / robotwin_dir
 os.chdir(robotwin_dir)
 sys.path.append(str(robotwin_dir / "script"))
 
 sys.path.append("./")
-sys.path.append(f"./policy")
+sys.path.append("./policy")
 sys.path.append("./description/utils")
-from envs import CONFIGS_PATH
-from envs.utils.create_actor import UnStableError
+import argparse
+import importlib
+from datetime import datetime
 
 import numpy as np
-from collections import deque
-import traceback
-
 import yaml
-from datetime import datetime
-import importlib
-import argparse
-import pdb
+from envs import CONFIGS_PATH
+from envs.utils.create_actor import UnStableError
+from generate_episode_instructions import generate_episode_descriptions
+from script.deploy.eval_diagnostics import interrupt_on_signal
+from script.deploy.robotwin_evaluation import evaluate_task
 
-from generate_episode_instructions import *
 
 def class_decorator(task_name):
     envs_module = importlib.import_module(f"envs.{task_name}")
     try:
         env_class = getattr(envs_module, task_name)
-        env_instance = env_class()
-    except:
-        raise SystemExit("No Task")
-    return env_instance
+    except AttributeError as exc:
+        raise SystemExit(f"Task class missing: {task_name}") from exc
+    return env_class()
 
 
 def eval_function_decorator(policy_name, model_name):
@@ -47,6 +51,7 @@ def eval_function_decorator(policy_name, model_name):
         return getattr(policy_model, model_name)
     except ImportError as e:
         raise e
+
 
 def get_camera_config(camera_type):
     camera_config_path = Path(CONFIGS_PATH) / "_camera_config.yml"
@@ -68,7 +73,7 @@ def get_embodiment_config(robot_file):
 
 
 def main(usr_args):
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
     task_name = usr_args["task_name"]
     task_config = usr_args["task_config"]
     ckpt_setting = usr_args.get("ckpt_setting") or usr_args.get("train_config_name", "default")
@@ -85,8 +90,9 @@ def main(usr_args):
         args = yaml.load(f.read(), Loader=yaml.FullLoader)
 
     instruction_type = instruction_type or args["eval_instruction"]
+    args["eval_instruction"] = instruction_type
 
-    args['task_name'] = task_name
+    args["task_name"] = task_name
     args["task_config"] = task_config
     args["ckpt_setting"] = ckpt_setting
 
@@ -136,10 +142,20 @@ def main(usr_args):
         output_root = Path(os.path.expandvars(os.environ.get("OUTPUT_DIR") or "outputs")).expanduser()
         if not output_root.is_absolute():
             output_root = WORKSPACE / output_root
-        save_dir = output_root / "eval_outputs" / f"{policy_name}_{ckpt_setting}_{task_config}_{current_time}" / "eval_results" / task_name
+        save_dir = (
+            output_root
+            / "eval_outputs"
+            / f"{policy_name}_{ckpt_setting}_{task_config}_{current_time}"
+            / "eval_results"
+            / task_name
+        )
         if save_dir.exists():
             raise ValueError(f"Refusing to reuse eval results: {save_dir}")
     save_dir.mkdir(parents=True, exist_ok=True)
+    usr_args["_task_dir"] = str(save_dir)
+    usr_args.setdefault("run_dir", str(save_dir.parent.parent))
+    if usr_args.get("eval_trace", "full") not in ("full", "off"):
+        raise ValueError("eval_trace must be full or off")
 
     # 命令行 --eval_video_log 优先于 YAML 配置
     if "eval_video_log" in usr_args:
@@ -164,10 +180,18 @@ def main(usr_args):
     print("\033[95mRandom Table Height:\033[0m " + str(args["domain_randomization"]["random_table_height"]))
     print("\033[95mRandom Head Camera Distance:\033[0m " + str(args["domain_randomization"]["random_head_camera_dis"]))
 
-    print("\033[94mHead Camera Config:\033[0m " + str(args["camera"]["head_camera_type"]) + f", " +
-          str(args["camera"]["collect_head_camera"]))
-    print("\033[94mWrist Camera Config:\033[0m " + str(args["camera"]["wrist_camera_type"]) + f", " +
-          str(args["camera"]["collect_wrist_camera"]))
+    print(
+        "\033[94mHead Camera Config:\033[0m "
+        + str(args["camera"]["head_camera_type"])
+        + ", "
+        + str(args["camera"]["collect_head_camera"])
+    )
+    print(
+        "\033[94mWrist Camera Config:\033[0m "
+        + str(args["camera"]["wrist_camera_type"])
+        + ", "
+        + str(args["camera"]["collect_wrist_camera"])
+    )
     print("\033[94mEmbodiment Config:\033[0m " + embodiment_name)
     print("\n==================================")
 
@@ -176,247 +200,19 @@ def main(usr_args):
     usr_args["left_arm_dim"] = len(args["left_embodiment_config"]["arm_joints_name"][0])
     usr_args["right_arm_dim"] = len(args["right_embodiment_config"]["arm_joints_name"][1])
 
-    seed = usr_args["seed"]
-
-    st_seed = 100000 * (1 + seed)
-    suc_nums = []
-    test_num = int(usr_args.get("num_episodes", 100))
-    if test_num < 1:
-        raise ValueError(f"num_episodes must be positive, got {test_num}")
-    topk = 1
-
-    # model = get_model(usr_args)
-    # from IPython import embed;embed()
     from script.deploy.websocket_client_policy import WebsocketClientPolicy
-    model = WebsocketClientPolicy(port=usr_args['port'])
 
-    st_seed, suc_num = eval_policy(task_name,
-                                   TASK_ENV,
-                                   args,
-                                   model,
-                                   st_seed,
-                                   test_num=test_num,
-                                   video_size=video_size,
-                                   video_fps=video_fps,
-                                   instruction_type=instruction_type,
-                                   usr_args=usr_args)
-    suc_nums.append(suc_num)
+    model = WebsocketClientPolicy(port=usr_args["port"])
 
-    topk_success_rate = sorted(suc_nums, reverse=True)[:topk]
-
-    file_path = os.path.join(save_dir, f"_result.txt")
-    with open(file_path, "w") as file:
-        file.write(f"Timestamp: {current_time}\n\n")
-        file.write(f"Instruction Type: {instruction_type}\n\n")
-        # file.write(str(task_reward) + '\n')
-        file.write("\n".join(map(str, np.array(suc_nums) / test_num)))
-
-    print(f"Data has been saved to {file_path}")
-    # return task_reward
-
-
-def eval_policy(task_name,
-                TASK_ENV,
-                args,
-                model,
-                st_seed,
-                test_num=100,
-                video_size=None,
-                video_fps="10",
-                instruction_type=None,
-                usr_args = None):
-    print(f"\033[34mTask Name: {args['task_name']}\033[0m")
-    print(f"\033[34mPolicy Name: {args['policy_name']}\033[0m")
-
-    expert_check = True
-    TASK_ENV.suc = 0
-    TASK_ENV.test_num = 0
-
-    now_id = 0
-    succ_seed = 0
-    suc_test_seed_list = []
-
-    policy_name = args["policy_name"]
-    # eval_func = eval_function_decorator(policy_name, "eval")
-    # reset_func = eval_function_decorator(policy_name, "reset_model")
-
-    now_seed = st_seed
-    task_total_reward = 0
-    clear_cache_freq = args["clear_cache_freq"]
-
-    args["eval_mode"] = True
-
-    while succ_seed < test_num:
-        render_freq = args["render_freq"]
-        args["render_freq"] = 0
-
-        if expert_check:
-            try:
-                TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
-                episode_info = TASK_ENV.play_once()
-                TASK_ENV.close_env()
-            except UnStableError as e:
-                # print(" -------------")
-                # print("Error: ", e)
-                # print(" -------------")
-                TASK_ENV.close_env()
-                now_seed += 1
-                args["render_freq"] = render_freq
-                continue
-            except Exception as e:
-                # stack_trace = traceback.format_exc()
-                # print(" -------------")
-                # print("Error: ", e)
-                # print(" -------------")
-                TASK_ENV.close_env()
-                now_seed += 1
-                args["render_freq"] = render_freq
-                print(f"error occurs ! {e}")
-                continue
-
-        if (not expert_check) or (TASK_ENV.plan_success and TASK_ENV.check_success()):
-            succ_seed += 1
-            suc_test_seed_list.append(now_seed)
-        else:
-            now_seed += 1
-            args["render_freq"] = render_freq
-            continue
-
-        args["render_freq"] = render_freq
-
-        TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
-        episode_info_list = [episode_info["info"]]
-        results = generate_episode_descriptions(args["task_name"], episode_info_list, test_num)
-        instruction = np.random.choice(results[0][instruction_type])
-        TASK_ENV.set_instruction(instruction=instruction)  # set language instruction
-
-        if TASK_ENV.eval_video_path is not None:
-            ffmpeg = subprocess.Popen(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-loglevel",
-                    "error",
-                    "-f",
-                    "rawvideo",
-                    "-pixel_format",
-                    "rgb24",
-                    "-video_size",
-                    video_size,
-                    "-framerate",
-                    video_fps,
-                    "-i",
-                    "-",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-vcodec",
-                    "libx264",
-                    "-crf",
-                    "23",
-                    f"{TASK_ENV.eval_video_path}/episode{TASK_ENV.test_num}.mp4",
-                ],
-                stdin=subprocess.PIPE,
-            )
-            TASK_ENV._set_eval_video_ffmpeg(ffmpeg)
-
-        succ = False
-        path_to_pi_model = None
-        if usr_args is not None and "new_ckpt_path" in usr_args:
-            path_to_pi_model = usr_args['new_ckpt_path']
-        ret = model.infer(dict(reset = True, robo_name=usr_args['robo_name'], path_to_pi_model=path_to_pi_model))
-        
-        while TASK_ENV.take_action_cnt<TASK_ENV.step_lim and not succ:
-            observation = TASK_ENV.get_obs()
-            # from IPython import embed;embed()
-            
-            formatted_observation = {
-                "observation.images.cam_high": observation["observation"]["head_camera"]["rgb"], # H,W,3
-                "observation.images.cam_left_wrist": observation["observation"]["left_camera"]["rgb"],
-                "observation.images.cam_right_wrist": observation["observation"]["right_camera"]["rgb"],
-                
-                "observation.state": observation["joint_action"]["vector"],
-                "task": TASK_ENV.get_instruction(),
-            }
-
-            # print(formatted_observation["observation.images.cam_high"].shape)
-            # ========= debug image =========
-            # import torch, torchvision
-            # from PIL import Image
-            # imgs_np = []
-            # for k in ['base_0_rgb', 'left_wrist_0_rgb', 'right_wrist_0_rgb']:
-            #     arr = formatted_observation['image'][k].squeeze(0)  # (H,W,3), uint8
-            #     print(arr.max(), arr.min())
-            #     imgs_np.append(arr)
-
-            # concat = np.concatenate(imgs_np, axis=1)
-            # if TASK_ENV.take_action_cnt % 25 ==0:
-            #     Image.fromarray(concat).save(f'combined_{TASK_ENV.take_action_cnt}.png')
-            # ========= debug image =========
-
-            # from IPython import embed;embed()
-            ret = model.infer(formatted_observation) #(TASK_ENV, model, observation)
-            action, latency = ret['action'], ret['server_timing']
-            if len(action.shape) == 2:
-                for action_index, act in enumerate(action):
-                    # get_obs() also renders/writes the evaluation frame.  The
-                    # outer loop captured the frame for the first action; refresh
-                    # before every later action so a returned action chunk does
-                    # not become one frozen frame repeated in the output video.
-                    if action_index > 0 and TASK_ENV.eval_video_path is not None:
-                        TASK_ENV.get_obs()
-                    TASK_ENV.take_action(act)
-                    if TASK_ENV.eval_success:
-                        succ = True
-                        # Preserve the reached success state as the final frame.
-                        if TASK_ENV.eval_video_path is not None:
-                            TASK_ENV.get_obs()
-                        break
-            else:
-                TASK_ENV.take_action(action)
-                if TASK_ENV.eval_success:
-                    succ = True
-                    if TASK_ENV.eval_video_path is not None:
-                        TASK_ENV.get_obs()
-            
-            print(f"infer time {latency}")
-
-
-        # task_total_reward += TASK_ENV.episode_score
-        if TASK_ENV.eval_video_path is not None:
-            TASK_ENV._del_eval_video_ffmpeg()
-
-        result_tag = "success" if succ else "failure"
-        
-        old_name = f"{TASK_ENV.eval_video_path}/episode{TASK_ENV.test_num}.mp4"
-        new_name = f"{TASK_ENV.eval_video_path}/episode{TASK_ENV.test_num}_{result_tag}.mp4"
-
-        if os.path.exists(old_name):
-            os.rename(old_name, new_name)
-            print(f"Video saved: {new_name}")
-
-
-        if succ:
-            TASK_ENV.suc += 1
-            print("\033[92mSuccess!\033[0m")
-        else:
-            print("\033[91mFail!\033[0m")
-
-        now_id += 1
-        TASK_ENV.close_env(clear_cache=((succ_seed + 1) % clear_cache_freq == 0))
-
-        if TASK_ENV.render_freq:
-            TASK_ENV.viewer.close()
-
-        TASK_ENV.test_num += 1
-
-        print(
-            f"\033[93m{task_name}\033[0m | \033[94m{args['policy_name']}\033[0m | \033[92m{args['task_config']}\033[0m | \033[91m{args['ckpt_setting']}\033[0m\n"
-            f"Success rate: \033[96m{TASK_ENV.suc}/{TASK_ENV.test_num}\033[0m => \033[95m{round(TASK_ENV.suc/TASK_ENV.test_num*100, 1)}%\033[0m, current seed: \033[90m{now_seed}\033[0m\n"
+    def instruction_factory(episode_info):
+        results = generate_episode_descriptions(
+            args["task_name"], [episode_info["info"]], int(usr_args.get("num_episodes", 100))
         )
-        # TASK_ENV._take_picture()
-        now_seed += 1
+        return np.random.choice(results[0][instruction_type])
 
-    return now_seed, TASK_ENV.suc
+    evaluate_task(
+        TASK_ENV, args, model, usr_args, instruction_factory, UnStableError, video_size=video_size, video_fps=video_fps
+    )
 
 
 def parse_args_and_config():
@@ -434,12 +230,14 @@ def parse_args_and_config():
     # Parse overrides
     def parse_override_pairs(pairs):
         override_dict = {}
+        if len(pairs) % 2:
+            raise ValueError("Overrides must be key/value pairs")
         for i in range(0, len(pairs), 2):
             key = pairs[i].lstrip("--")
             value = pairs[i + 1]
             try:
-                value = eval(value)
-            except:
+                value = ast.literal_eval(value)
+            except (ValueError, SyntaxError):
                 pass
             override_dict[key] = value
         return override_dict
@@ -457,4 +255,5 @@ if __name__ == "__main__":
 
     usr_args = parse_args_and_config()
 
-    main(usr_args)
+    with interrupt_on_signal():
+        main(usr_args)

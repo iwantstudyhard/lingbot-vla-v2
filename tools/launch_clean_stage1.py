@@ -26,8 +26,11 @@ def prepare_command(args):
         if Path(config["train"]["output_dir"]).resolve() != output:
             raise ValueError("Moved runs require deliberate path migration before resume")
         checkpoints = output / "checkpoints"
-        if not any(checkpoints.glob("global_step_*/.metadata")):
-            raise ValueError("No distributed checkpoint available for resume")
+        if not any(path.is_file() for path in checkpoints.glob("global_step_*/model/.metadata")):
+            raise ValueError(
+                f"No distributed checkpoint available for resume: expected "
+                f"{checkpoints}/global_step_*/model/.metadata"
+            )
         # Structural placeholder is sufficient; no weights are read here.
         resolve_inference_normalization(checkpoints / "global_step_0/hf_ckpt", config)
         configured = json.loads(Path(config["data"]["norm_stats_file"]).read_bytes())
@@ -64,7 +67,7 @@ def main():
     parser.add_argument("--init-hf", help="Optional relocated OFFICIAL pretrained initialization")
     parser.add_argument("--output-dir")
     parser.add_argument("--resume-run", help="Only a new audited stage1 run, never the historical mixed-stat run")
-    parser.add_argument("--gpus", default="0")
+    parser.add_argument("--gpus", default="0", help="Comma-separated GPU IDs; manually match batch settings in YAML (default: 0)")
     parser.add_argument("--master-port", type=int, default=62500)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--smoke", action="store_true", help="NEW 5-step/5-save verification run; never a formal baseline")
