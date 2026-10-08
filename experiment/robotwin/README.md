@@ -159,6 +159,13 @@ the original open-loop chunk setting.
 
 ### Optional action smoothing (diagnostic mitigation, not a training fix)
 
+The launcher passes the **absolute path** to this repository's
+`experiment/robotwin/deploy_policy.yml`. It no longer depends on a relative
+`policy/ACT/deploy_policy.yml` in the caller's directory or RoboTwin checkout.
+The maintained client defaults are checked before any model server starts;
+actual task/camera/robot settings still come from RoboTwin's `CONFIGS_PATH`.
+`ACT` remains a legacy result label, not a loaded ACT policy.
+
 Defaults remain unchanged: `--action_smoothing none` sends the raw predictions.
 To test smoothing, append:
 

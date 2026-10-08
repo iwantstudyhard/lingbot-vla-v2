@@ -350,6 +350,13 @@ fi
 policy_name=ACT
 train_config_name=0
 seed=0
+eval_policy_config="${inference_workdir%/}/experiment/robotwin/deploy_policy.yml"
+if [ ! -f "$eval_policy_config" ]; then
+    echo "Error: maintained eval client config not found: $eval_policy_config" >&2
+    echo "Pull experiment/robotwin/deploy_policy.yml with the launcher; no GPU servers were started." >&2
+    exit 1
+fi
+echo "Eval client config: $eval_policy_config"
 
 # ===== Compute inference slot count =====
 # actual slots = min(num_tasks, num_gpus * num_per_gpu)
@@ -627,7 +634,7 @@ launch_task() {
     PYTHONWARNINGS=ignore::UserWarning \
     XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
     SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 \
-    setsid bash -c "source ${conda_sh} && conda activate ${sim_env} && export PYTHONPATH=\"\$(python -c 'import site;print(site.getsitepackages()[0])')\${PYTHONPATH:+:\$PYTHONPATH}\" && PYTHONUNBUFFERED=1 PYTHONWARNINGS=ignore::UserWarning XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 python -u ${eval_client_dst} --config policy/${policy_name}/deploy_policy.yml \
+    setsid bash -c "source ${conda_sh} && conda activate ${sim_env} && export PYTHONPATH=\"\$(python -c 'import site;print(site.getsitepackages()[0])')\${PYTHONPATH:+:\$PYTHONPATH}\" && PYTHONUNBUFFERED=1 PYTHONWARNINGS=ignore::UserWarning XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 python -u ${eval_client_dst} --config '${eval_policy_config}' \
         --overrides \
         --task_name ${task_name} \
         --task_config ${task_config} \
