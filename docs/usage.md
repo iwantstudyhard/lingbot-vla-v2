@@ -16,7 +16,19 @@ bash tools/create_train_env.sh --env-name lingbotvla
 conda activate lingbotvla
 ```
 
-训练环境采用 Python 3.12 / PyTorch 2.8；安装脚本也安装深度依赖和 LeRobot。两阶段 clean 启动器当前要求 **4 张不同 GPU**，示例使用 `0,1,2,3`。
+训练环境采用 Python 3.12 / PyTorch 2.8 / TorchCodec 0.6；安装脚本也安装 FFmpeg 6、深度依赖和 LeRobot，并检查视频解码依赖能否加载。两阶段 clean 启动器当前要求 **4 张不同 GPU**，示例使用 `0,1,2,3`。
+
+若已有环境在读取视频时出现 `Could not load libtorchcodec`，并提示找不到 `libavutil.so.*`，先在运行训练的同一主机或容器中补齐 FFmpeg 共享库：
+
+```bash
+conda activate lingbotvla
+conda install -c conda-forge "ffmpeg=6" -y
+# 单独运行 Python 解码检查时设置；train.sh 会自动设置此路径
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+python -c 'import torch, torchcodec; from torchcodec.decoders import VideoDecoder; print(torch.__version__, torchcodec.__version__, "decoder imports OK")'
+```
+
+TorchCodec 0.6 支持 FFmpeg 4～7；这里固定 FFmpeg 6，避免装入不受支持的新版。仅有静态 `ffmpeg` 可执行文件不足以满足共享库依赖。若 TorchCodec 版本被其他安装步骤改变，按项目固定版本恢复：`python -m pip install --no-deps torchcodec==0.6.0`。安装依据见 [TorchCodec 0.6 安装说明](https://github.com/meta-pytorch/torchcodec/blob/v0.6.0/README.md#installing-torchcodec) 与 [版本兼容表](https://github.com/meta-pytorch/torchcodec#compatibility-with-torch-versions)。
 
 只有仿真评测需要 RoboTwin 环境和仿真资源，训练已有数据不需要安装模拟器。按 [RoboTwin 安装说明](../RoboTwin/README.md) 创建独立的 `RoboTwin` 环境后，在该环境中执行：
 

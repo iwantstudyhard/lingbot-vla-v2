@@ -16,6 +16,11 @@ export WORKSPACE=$(cd "${WORKSPACE:-$PROJECT_ROOT}" && pwd)
 cd "$WORKSPACE"
 export PYTHONPATH="$WORKSPACE${PYTHONPATH:+:$PYTHONPATH}"
 
+# TorchCodec needs FFmpeg shared libraries installed in the active environment.
+if [[ -n "${CONDA_PREFIX:-}" ]]; then
+  export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+
 if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
   NPROC_PER_NODE=$(nvidia-smi -L | wc -l)
 else

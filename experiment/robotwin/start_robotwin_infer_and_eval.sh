@@ -440,7 +440,9 @@ for slot in $(seq 0 $((num_slots-1))); do
             tail -n 100 "$log_file" 2>/dev/null || true
             exit 1
         fi
-        if curl --noproxy '*' --silent --fail --max-time 2 "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1; then
+        # Conda/CUDA library paths can break system curl's libffi dependencies.
+        # Clear them only for this probe; policy and simulator retain their paths.
+        if env -u LD_LIBRARY_PATH curl --noproxy '*' --silent --fail --max-time 2 "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1; then
             echo -e "\033[32m[inf slot $slot] Policy server is ready.\033[0m"
             break
         fi
@@ -463,7 +465,7 @@ cd "$eval_workdir" || { echo -e "\033[31mError: sim workdir ${eval_workdir} miss
 # ===== Ensure the lingbot eval client is present under RoboTwin/script =====
 # The eval client resolves its ../task_config relative to its own location, so it
 # must live at <RoboTwin>/script/ for _camera_config.yml to be found.
-eval_client_src="${inference_workdir}experiment/robotwin/eval_policy_client_lingbotvla.py"
+eval_client_src="${inference_workdir%/}/experiment/robotwin/eval_policy_client_lingbotvla.py"
 eval_client_dst="${eval_workdir}/script/eval_policy_client_lingbotvla.py"
 if [ ! -f "$eval_client_src" ]; then
     echo -e "\033[31mError: eval client source not found: ${eval_client_src}\033[0m"
@@ -478,7 +480,7 @@ fi
 # The eval client does `from script.deploy.websocket_client_policy import WebsocketClientPolicy`,
 # which pulls in a sibling msgpack_numpy. Keep the RoboTwin-side copies in sync
 # with this inference checkout so an older helper cannot silently survive a pull.
-deploy_pkg_src="${inference_workdir}deploy"
+deploy_pkg_src="${inference_workdir%/}/deploy"
 deploy_pkg_dst="${eval_workdir}/script/deploy"
 mkdir -p "$deploy_pkg_dst"
 for f in __init__.py websocket_client_policy.py msgpack_numpy.py; do
