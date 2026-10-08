@@ -272,6 +272,46 @@ class CleanContractTests(unittest.TestCase):
             for name in ("--train.micro_batch_size", "--train.gradient_accumulation_steps", "--train.global_batch_size"):
                 self.assertNotIn(name, command)
 
+    def test_stage1_resume_accepts_checkpoint_writer_layout(self):
+        with TemporaryDirectory() as tmp:
+            run = Path(tmp) / "stage1"
+            record = freeze_normalization(self.stats_file, run, 548893)
+            config = yaml.safe_load((REPO_ROOT / "configs/vla/robotwin/robotwin_clean_stage1.yaml").read_text())
+            weights = Path(tmp) / "weights"
+            weights.mkdir()
+            (weights / "config.json").write_text("{}")
+            (weights / "model.safetensors").touch()
+            config["model"]["model_path"] = str(weights)
+            config["train"]["output_dir"] = str(run.resolve())
+            config["data"]["norm_stats_file"] = record["path"]
+            (run / "lingbotvla_cli.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+            checkpoint = run / "checkpoints/global_step_18000"
+            for component in ("model", "optimizer"):
+                directory = checkpoint / component
+                directory.mkdir(parents=True)
+                (directory / ".metadata").touch()
+            extra_state = checkpoint / "extra_state"
+            extra_state.mkdir()
+            (extra_state / "extra_state_rank_0.pt").touch()
+            args = SimpleNamespace(gpus="0,1,2,3", master_port=62500, resume_run=str(run),
+                                   init_hf=None, output_dir=None)
+
+            with patch("tools.launch_clean_stage1.preflight"):
+                command, _ = stage1_command(args)
+
+            self.assertEqual(command[command.index("--train.enable_resume") + 1], "true")
+            self.assertEqual(command[command.index("--train.output_dir") + 1], str(run.resolve()))
+            self.assertIn(str(run / "lingbotvla_cli.yaml"), command)
+
+            # HF exports and misplaced root metadata cannot establish DCP availability.
+            (checkpoint / "model/.metadata").unlink()
+            (checkpoint / ".metadata").touch()
+            hf = checkpoint / "hf_ckpt"
+            hf.mkdir()
+            (hf / "model.safetensors").touch()
+            with self.assertRaisesRegex(ValueError, "global_step_.*model/.metadata"):
+                stage1_command(args)
+
     def test_stage2_refuses_legacy_checkpoint(self):
         with TemporaryDirectory() as tmp:
             weights = Path(tmp) / "old/checkpoints/global_step_2000/hf_ckpt"
