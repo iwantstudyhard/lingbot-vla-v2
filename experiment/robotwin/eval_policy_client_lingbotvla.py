@@ -152,9 +152,7 @@ def main(usr_args):
         if save_dir.exists():
             raise ValueError(f"Refusing to reuse eval results: {save_dir}")
     save_dir.mkdir(parents=True, exist_ok=True)
-    attempt_dir = save_dir / "attempts" / f"attempt_{int(usr_args.get('attempt', 1))}"
-    attempt_dir.mkdir(parents=True, exist_ok=False)
-    usr_args["_attempt_dir"] = str(attempt_dir)
+    usr_args["_task_dir"] = str(save_dir)
     usr_args.setdefault("run_dir", str(save_dir.parent.parent))
     if usr_args.get("eval_trace", "full") not in ("full", "off"):
         raise ValueError("eval_trace must be full or off")
@@ -164,7 +162,7 @@ def main(usr_args):
         args["eval_video_log"] = usr_args["eval_video_log"]
 
     if args["eval_video_log"]:
-        video_save_dir = attempt_dir
+        video_save_dir = save_dir
         camera_config = get_camera_config(args["camera"]["head_camera_type"])
         video_size = str(camera_config["w"]) + "x" + str(camera_config["h"])
         video_save_dir.mkdir(parents=True, exist_ok=True)

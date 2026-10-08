@@ -715,7 +715,7 @@ report_progress() {
     local now_ts=$1
     local running=0
     local queued=$(( ${#task_queue[@]} - queue_idx ))
-    local slot task_name log_file elapsed attempt rate_line suc_num done_ep rate_pct progress_text
+    local slot task_name elapsed attempt progress_text
 
     for slot in $(seq 0 $((num_slots-1))); do
         [ "${slot_pid[$slot]}" != "0" ] && running=$((running + 1))
@@ -725,10 +725,8 @@ report_progress() {
     for slot in $(seq 0 $((num_slots-1))); do
         [ "${slot_pid[$slot]}" = "0" ] && continue
         task_name="${slot_task[$slot]}"
-        log_file="${slot_log[$slot]}"
         elapsed=$(( now_ts - slot_start[$slot] ))
         attempt=$(( task_retries[$task_name] + 1 ))
-        progress_text="episodes 0/${num_episodes} (initializing)"
 
         progress_text=$("$logging_python" "$script_root/deploy/eval_logging.py" progress --run "$run_dir" --fields "task=$task_name" "attempt=$attempt") || exit 1
 

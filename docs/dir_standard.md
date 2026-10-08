@@ -122,17 +122,16 @@ lingbot-vla-v2/
 │               └── <任务名>/
 │                   ├── _result.txt
 │                   ├── task_summary.json
-│                   └── attempts/attempt_N/
-│                       ├── task_config.json
-│                       ├── attempt_result.json
-│                       ├── seed_checks.jsonl
-│                       ├── episode_results.jsonl
-│                       └── episodes/episode_I_seed_S/
-│                           ├── episode.json
-│                           ├── inference.jsonl
-│                           ├── execution.jsonl
-│                           ├── predictions/*.npz
-│                           └── episode*_success.mp4
+│                   ├── task_config.jsonl
+│                   ├── attempt_results.jsonl
+│                   ├── seed_checks.jsonl
+│                   ├── episode_results.jsonl
+│                   └── episodes/episode_I_seed_S_attempt_N/
+│                       ├── episode.json
+│                       ├── inference.jsonl
+│                       ├── execution.jsonl
+│                       ├── predictions/*.npz
+│                       └── episode*_success.mp4
 │
 ├── RoboTwin/                          # 独立 Git 子模块，固定到明确提交
 │
@@ -222,6 +221,6 @@ $OUTPUT_DIR/train_outputs/<实验名>_<run_id>/
 $OUTPUT_DIR/eval_outputs/<实验名>_<检查点步数>k_<task_config>_<时间戳>/
 ```
 
-该目录名作为本次评测的运行 ID。一次脚本启动生成一个运行目录，包含本次启动涉及的全部推理服务日志、任务日志、PID 文件、统计文件和评测结果。任务结果写入 `eval_results/<任务名>/`，完整预测、逐动作反馈和视频按 `attempts/attempt_N/episodes/episode_I_seed_S/` 隔离保存，兼容汇总 `_result.txt` 保留在任务根目录。详细字段和离线报告见 [eval_logging.md](eval_logging.md)。open-loop 评测的轨迹图默认位于 `$OUTPUT_DIR/eval_outputs/open_loop_<run_id>/`，不生成 RoboTwin 专用的日志、PID 或视频目录。
+该目录名作为本次评测的运行 ID。一次脚本启动生成一个运行目录，包含本次启动涉及的全部推理服务日志、任务日志、PID 文件、统计文件和评测结果。任务结果写入 `eval_results/<任务名>/`，完整预测、逐动作反馈和视频按 `episodes/episode_I_seed_S_attempt_N/` 保存。配置及结果按重试编号追加到任务级 JSONL，兼容汇总 `_result.txt` 保留在任务根目录。详细字段和离线报告见 [eval_logging.md](eval_logging.md)。open-loop 评测的轨迹图默认位于 `$OUTPUT_DIR/eval_outputs/open_loop_<run_id>/`，不生成 RoboTwin 专用的日志、PID 或视频目录。
 
 RoboTwin 原生 XPolicyLab 调度器保留其微秒时间戳运行目录名，默认落在 `$OUTPUT_DIR/eval_outputs/<时间戳>/`。其实际产物为 `logs/`、`jobs/`、`summary.json`，任务结果和视频集中到同次运行的 `eval_results/<任务>/<策略>/<task_config>/<checkpoint>/<时间戳>/`。独立策略服务入口同样在 `eval_outputs/<时间戳>/` 保存现有服务日志，单任务客户端保留任务内部层级。显式 `--output-dir` 保持原生调度器的分类根含义，客户端 `--output_dir` 为任务结果根，不重复追加 `eval_outputs/`。客户端同步到 RoboTwin 的文件由主项目管理，并在子仓库中忽略。

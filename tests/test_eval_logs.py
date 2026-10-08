@@ -22,9 +22,11 @@ from deploy.eval_logging import (
     EventWriter,
     atomic_json,
     atomic_npz,
+    format_progress,
     prediction_path,
     read_events,
     read_json,
+    read_task_attempts,
     summarize_run,
 )
 from deploy.robotwin_evaluation import evaluate_task
@@ -167,7 +169,7 @@ class Fixture(unittest.TestCase):
         atomic_json(self.run / "run_manifest.json", {"tasks": ["lift_pot"], "num_episodes": 2})
 
     def trace(self, enabled=True, episode=0, attempt=1):
-        directory = self.run / "eval_results/lift_pot/attempts" / f"attempt_{attempt}"
+        directory = self.run / "eval_results/lift_pot"
         return EpisodeTrace(
             directory,
             {
@@ -183,6 +185,32 @@ class Fixture(unittest.TestCase):
 
 
 class LoggingTests(Fixture):
+    def test_progress_restores_rate_and_lifecycle_state(self):
+        self.assertEqual(format_progress(self.run, "lift_pot", 1), "episodes 0/2, success 0, rate N/A (initializing)")
+        trace = self.trace(enabled=False)
+        self.assertIn("rate N/A (running)", format_progress(self.run, "lift_pot", 1))
+        trace.finish("success", Env())
+        self.assertEqual(format_progress(self.run, "lift_pot", 1), "episodes 1/2, success 1, rate 100.0% (running)")
+        root = trace.directory.parent.parent
+        EventWriter(root / "episode_results.jsonl", {"attempt": 1}).write(
+            "episode_end", episode_id=1, reason="step_limit"
+        )
+        EventWriter(root / "attempt_results.jsonl", {"attempt": 1}).write("attempt_end", status="complete")
+        self.assertEqual(format_progress(self.run, "lift_pot", 1), "episodes 2/2, success 1, rate 50.0% (complete)")
+        self.assertIn("rate N/A (initializing)", format_progress(self.run, "lift_pot", 2))
+
+    def test_progress_excludes_exception_from_rate_and_recovers_partial_line(self):
+        root = self.run / "eval_results/lift_pot"
+        EventWriter(root / "task_config.jsonl", {"attempt": 1}).write("task_config", requested_episodes=5)
+        writer = EventWriter(root / "episode_results.jsonl", {"attempt": 1})
+        writer.write("episode_end", episode_id=0, reason="step_limit")
+        writer.write("episode_end", episode_id=1, reason="exception")
+        with writer.path.open("a") as stream:
+            stream.write('{"unfinished":')
+        self.assertEqual(format_progress(self.run, "lift_pot", 1), "episodes 1/5, success 0, rate 0.0% (exception)")
+        EventWriter(root / "attempt_results.jsonl", {"attempt": 1}).write("attempt_end", status="interrupted")
+        self.assertIn("(interrupted)", format_progress(self.run, "lift_pot", 1))
+
     def test_flush_strict_json_and_truncated_line_recovery(self):
         path = self.run / "events.jsonl"
         EventWriter(path).write("test", numeric=np.array([1, np.inf, np.nan]))
@@ -192,6 +220,8 @@ class LoggingTests(Fixture):
         warnings = []
         self.assertEqual(len(read_events(path, warnings)), 1)
         self.assertEqual(len(warnings), 1)
+        EventWriter(path).write("next_attempt")
+        self.assertEqual([item["event"] for item in read_events(path)], ["test", "next_attempt"])
 
     def test_numeric_npz_no_pickle_no_overwrite_and_cleanup(self):
         path = self.run / "prediction.npz"
@@ -213,11 +243,15 @@ class LoggingTests(Fixture):
 
     def test_attempt_isolation_and_complete_only_statistics(self):
         for attempt, reasons in ((1, ["success", "exception"]), (2, ["step_limit", "step_limit"]), (3, ["success"])):
-            root = self.run / "eval_results/lift_pot/attempts" / f"attempt_{attempt}"
-            atomic_json(root / "task_config.json", {"requested_episodes": 2})
-            atomic_json(root / "attempt_result.json", {"status": "complete" if attempt == 2 else "error"})
+            root = self.run / "eval_results/lift_pot"
+            EventWriter(root / "task_config.jsonl", {"attempt": attempt}).write("task_config", requested_episodes=2)
+            EventWriter(root / "attempt_results.jsonl", {"attempt": attempt}).write(
+                "attempt_end", status="complete" if attempt == 2 else "error"
+            )
             for episode, reason in enumerate(reasons):
-                EventWriter(root / "episode_results.jsonl").write("episode_end", episode_id=episode, reason=reason)
+                EventWriter(root / "episode_results.jsonl", {"attempt": attempt}).write(
+                    "episode_end", episode_id=episode, reason=reason
+                )
         result = summarize_run(self.run)
         self.assertEqual(result["episodes"], 2)
         self.assertEqual(result["successes"], 0)
@@ -227,6 +261,50 @@ class LoggingTests(Fixture):
         self.assertEqual(before, (self.run / "summary.json").read_bytes())
         EventWriter(self.run / "scheduler_events.jsonl").write("task_exit", task="lift_pot", attempt=2, exit_code=1)
         self.assertEqual(summarize_run(self.run)["episodes"], 0)
+
+    def test_previously_saved_nested_logs_remain_readable(self):
+        from tools.analyze_eval_logs import generate_report
+
+        root = self.run / "eval_results/lift_pot/attempts/attempt_1"
+        atomic_json(root / "task_config.json", {"requested_episodes": 2})
+        atomic_json(root / "attempt_result.json", {"status": "complete"})
+        for episode in range(2):
+            EventWriter(root / "episode_results.jsonl").write("episode_end", episode_id=episode, reason="success")
+            atomic_json(
+                root / "episodes" / f"episode_{episode}_seed_{100001 + episode}" / "episode.json",
+                {
+                    "task": "lift_pot",
+                    "attempt": 1,
+                    "episode_id": episode,
+                    "seed": 100001 + episode,
+                    "status": "finished",
+                    "reason": "success",
+                    "eval_trace": "off",
+                },
+            )
+        self.assertEqual(summarize_run(self.run)["success_rate"], 1)
+        self.assertIn("rate 100.0% (complete)", format_progress(self.run, "lift_pot", 1))
+        generate_report(self.run, self.run / "analysis")
+        self.assertIn("episode_1_seed_100002", (self.run / "analysis/episodes.csv").read_text(encoding="utf-8-sig"))
+
+    def test_flat_retry_after_truncated_line_can_complete(self):
+        root = self.run / "eval_results/lift_pot"
+        for attempt in (1, 2):
+            EventWriter(root / "task_config.jsonl", {"attempt": attempt}).write("task_config", requested_episodes=2)
+            writer = EventWriter(root / "episode_results.jsonl", {"attempt": attempt})
+            writer.write("episode_end", episode_id=0, reason="success")
+            if attempt == 1:
+                with writer.path.open("a") as stream:
+                    stream.write('{"attempt": 1, "unfinished":')
+            else:
+                writer.write("episode_end", episode_id=1, reason="step_limit")
+                EventWriter(root / "attempt_results.jsonl", {"attempt": attempt}).write(
+                    "attempt_end", status="complete"
+                )
+        result = summarize_run(self.run)
+        self.assertEqual(result["success_rate"], 0.5)
+        self.assertEqual(result["tasks"][0]["selected_attempt"], 2)
+        self.assertTrue(result["warnings"])
 
 
 class ExecutionTests(Fixture):
@@ -416,8 +494,8 @@ class IntegrationTests(Fixture):
         return WebsocketPolicyServer(FakePolicy(self.run, invalid), eval_run_dir=str(self.run), eval_slot=slot)
 
     def evaluate(self, server, env=None, enabled=True, attempt=1, task="lift_pot"):
-        root = self.run / "eval_results" / task / "attempts" / f"attempt_{attempt}"
-        root.mkdir(parents=True, exist_ok=False)
+        root = self.run / "eval_results" / task
+        root.mkdir(parents=True, exist_ok=True)
 
         class Client:
             def get_server_metadata(self):
@@ -435,7 +513,7 @@ class IntegrationTests(Fixture):
             "clear_cache_freq": 10,
         }
         usr = {
-            "_attempt_dir": str(root),
+            "_task_dir": str(root),
             "run_dir": str(self.run),
             "robo_name": "robotwin",
             "num_episodes": 2,
@@ -480,11 +558,35 @@ class IntegrationTests(Fixture):
         server = self.server(invalid=True)
         with self.assertRaises(InvalidActionError):
             self.evaluate(server)
-        root = self.run / "eval_results/lift_pot/attempts/attempt_1"
+        root = self.run / "eval_results/lift_pot"
         self.assertEqual(read_events(root / "episode_results.jsonl")[0]["reason"], "invalid_action")
         with np.load(next(root.glob("episodes/*/predictions/*.npz")), allow_pickle=False) as data:
             self.assertTrue(np.isnan(data["returned_action"]).any())
         self.assertEqual(summarize_run(self.run)["episodes"], 0)
+
+    def test_flat_retries_preserve_predictions_and_do_not_mix_success_rates(self):
+        from tools.analyze_eval_logs import generate_report
+
+        server = self.server()
+        root = self.evaluate(server, env=Env(success_at=1))
+        originals = {path: path.read_bytes() for path in root.glob("episodes/*/predictions/*.npz")}
+        self.evaluate(server, attempt=2)
+        self.assertEqual(len(list(root.glob("episodes/*/predictions/*.npz"))), 4)
+        self.assertTrue(all(path.read_bytes() == content for path, content in originals.items()))
+        self.assertFalse((root / "attempts").exists())
+        self.assertEqual(len(read_events(root / "task_config.jsonl")), 2)
+        self.assertEqual(len(read_events(root / "attempt_results.jsonl")), 2)
+        self.assertEqual(summarize_run(self.run)["success_rate"], 0)
+        self.assertIn("success 2, rate 100.0% (complete)", format_progress(self.run, "lift_pot", 1))
+        self.assertIn("success 0, rate 0.0% (complete)", format_progress(self.run, "lift_pot", 2))
+        generate_report(self.run, self.run / "analysis")
+        import csv
+
+        with (self.run / "analysis/episodes.csv").open(encoding="utf-8-sig") as stream:
+            self.assertEqual(len(list(csv.DictReader(stream))), 4)
+        with self.assertRaisesRegex(FileExistsError, "Refusing to reuse attempt"):
+            self.evaluate(server, attempt=2)
+        self.assertEqual(len(read_events(root / "task_config.jsonl")), 2)
 
     def test_write_failure_and_disconnect_and_interruption(self):
         for attempt, failure in (
@@ -501,8 +603,12 @@ class IntegrationTests(Fixture):
                 with patch.object(server, "_infer", side_effect=failure), self.assertRaises(type(failure)):
                     self.evaluate(server, attempt=attempt)
         self.assertEqual(summarize_run(self.run)["episodes"], 0)
-        root = self.run / "eval_results/lift_pot/attempts/attempt_3"
-        self.assertEqual(read_events(root / "episode_results.jsonl")[0]["reason"], "interrupted")
+        root = self.run / "eval_results/lift_pot"
+        attempts = read_task_attempts(root)
+        self.assertEqual([item["attempt"] for item in attempts], [1, 2, 3])
+        self.assertEqual(attempts[-1]["episodes"][0]["reason"], "interrupted")
+        self.assertEqual(len(list(root.glob("episodes/*/episode.json"))), 3)
+        self.assertFalse((root / "attempts").exists())
 
     def test_off_mode_and_unsupported_handshake(self):
         server = self.server()

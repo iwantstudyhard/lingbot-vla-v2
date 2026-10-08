@@ -293,7 +293,9 @@ def generate_report(run: Path, output: Path, task: str | None = None, episode: i
         tasks = [item for item in tasks if item["task"] == task]
     episodes, anomalies, sections, timings = [], [], [], []
     first_tasks = set()
-    for directory in sorted((run / "eval_results").glob("*/attempts/attempt_*/episodes/episode_*")):
+    directories = list((run / "eval_results").glob("*/episodes/episode_*"))
+    directories.extend((run / "eval_results").glob("*/attempts/attempt_*/episodes/episode_*"))
+    for directory in sorted(directories):
         info = read_json(directory / "episode.json", {}, warnings)
         if (
             not info

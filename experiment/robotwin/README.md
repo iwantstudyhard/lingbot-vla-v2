@@ -140,7 +140,11 @@ outputs/eval_outputs/<exp>_<step>k_<task_config>_<timestamp>/
 ├── eval_results/<task>/
 │   ├── task_summary.json
 │   ├── _result.txt           # compatibility rate for the selected complete attempt
-│   └── attempts/attempt_N/episodes/episode_I_seed_S/
+│   ├── task_config.jsonl
+│   ├── attempt_results.jsonl
+│   ├── seed_checks.jsonl
+│   ├── episode_results.jsonl
+│   └── episodes/episode_I_seed_S_attempt_N/
 │       ├── episode.json
 │       ├── inference.jsonl
 │       ├── execution.jsonl

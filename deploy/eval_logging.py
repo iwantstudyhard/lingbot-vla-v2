@@ -98,8 +98,14 @@ class EventWriter:
 
     def write(self, event: str, **fields: Any) -> dict:
         item = record(self.context, event=event, **fields)
-        with self.path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n")
+        with self.path.open("ab+") as stream:
+            stream.seek(0, os.SEEK_END)
+            if stream.tell():
+                stream.seek(-1, os.SEEK_END)
+                if stream.read(1) != b"\n":
+                    # A crashed attempt may leave a partial line in the shared task log.
+                    stream.write(b"\n")
+            stream.write((json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8"))
             stream.flush()
         return item
 
@@ -176,6 +182,11 @@ def git_info(directory: Path) -> dict:
     }
 
 
+def episode_directory_name(context: dict) -> str:
+    """Keep retries distinct within a single task-level episodes directory."""
+    return f"episode_{int(context['episode_id'])}_seed_{int(context['seed'])}_attempt_{int(context['attempt'])}"
+
+
 def prediction_path(run: Path, context: dict) -> Path:
     """Construct paths from validated identifiers, never a client-supplied filesystem path."""
     for key in ("task", "request_id"):
@@ -186,18 +197,63 @@ def prediction_path(run: Path, context: dict) -> Path:
     numbers = {key: int(context[key]) for key in ("attempt", "episode_id", "seed")}
     if numbers["attempt"] < 1 or min(numbers["episode_id"], numbers["seed"]) < 0:
         raise ValueError("Invalid evaluation attempt/episode/seed")
-    episode = f"episode_{numbers['episode_id']}_seed_{numbers['seed']}"
     return (
         run
         / "eval_results"
         / context["task"]
-        / "attempts"
-        / f"attempt_{numbers['attempt']}"
         / "episodes"
-        / episode
+        / episode_directory_name(numbers)
         / "predictions"
         / f"request_{context['request_id']}.npz"
     )
+
+
+def read_task_attempts(root: Path, warnings: list | None = None) -> list[dict]:
+    """Group flat task records by attempt; also read previously saved nested logs."""
+    warnings = warnings if warnings is not None else []
+    attempts = {}
+    for directory in sorted((root / "attempts").glob("attempt_*")):
+        attempt = int(directory.name.split("_")[-1])
+        before = len(warnings)
+        config = read_json(directory / "task_config.json", {}, warnings)
+        terminal = read_json(directory / "attempt_result.json", {}, warnings)
+        episodes = read_events(directory / "episode_results.jsonl", warnings)
+        attempts[attempt] = {
+            "attempt": attempt,
+            "config": config,
+            "terminal": terminal,
+            "episodes": episodes,
+            "valid": len(warnings) == before,
+        }
+    flat_attempts = {}
+    for filename, field in (
+        ("task_config.jsonl", "config"),
+        ("attempt_results.jsonl", "terminal"),
+        ("episode_results.jsonl", "episodes"),
+    ):
+        for item in read_events(root / filename, warnings):
+            attempt = item.get("attempt")
+            if not isinstance(attempt, int) or attempt < 1:
+                warnings.append(f"{root / filename}: missing or invalid attempt")
+                continue
+            grouped = flat_attempts.setdefault(
+                attempt,
+                {
+                    "attempt": attempt,
+                    "config": {},
+                    "terminal": {},
+                    "episodes": [],
+                },
+            )
+            if field == "episodes":
+                grouped[field].append(item)
+            else:
+                grouped[field] = item
+    for attempt, grouped in flat_attempts.items():
+        # A damaged line from a prior retry must not invalidate later complete retries.
+        # Completeness still requires a config, terminal record and every unique episode.
+        attempts[attempt] = {**grouped, "valid": bool(grouped["config"])}
+    return [attempts[attempt] for attempt in sorted(attempts)]
 
 
 def summarize_run(run: Path, state: str | None = None, write: bool = True) -> dict:
@@ -211,30 +267,27 @@ def summarize_run(run: Path, state: str | None = None, write: bool = True) -> di
     for name in names:
         root = run / "eval_results" / name
         attempts = []
-        for attempt_dir in sorted((root / "attempts").glob("attempt_*"), key=lambda p: int(p.name.split("_")[-1])):
-            warning_count = len(warnings)
-            config = read_json(attempt_dir / "task_config.json", {}, warnings)
-            episodes = read_events(attempt_dir / "episode_results.jsonl", warnings)
+        for details in read_task_attempts(root, warnings):
+            attempt = details["attempt"]
+            config, episodes = details["config"], details["episodes"]
             expected = config.get("requested_episodes", manifest.get("num_episodes"))
             exits = [
                 item
                 for item in scheduler
-                if item.get("task") == name
-                and item.get("attempt") == int(attempt_dir.name.split("_")[-1])
-                and item.get("event") == "task_exit"
+                if item.get("task") == name and item.get("attempt") == attempt and item.get("event") == "task_exit"
             ]
-            terminal = read_json(attempt_dir / "attempt_result.json", {}, warnings)
+            terminal = details["terminal"]
             complete = (
                 terminal.get("status") == "complete"
                 and len(episodes) == expected
                 and len({item.get("episode_id") for item in episodes}) == expected
-                and len(warnings) == warning_count
+                and details["valid"]
                 and all(item.get("reason") in ("success", "step_limit") for item in episodes)
                 and (not exits or exits[-1].get("exit_code") == 0)
             )
             attempts.append(
                 {
-                    "attempt": int(attempt_dir.name.split("_")[-1]),
+                    "attempt": attempt,
                     "complete": complete,
                     "episodes": len(episodes),
                     "successes": sum(e.get("reason") == "success" for e in episodes),
@@ -302,6 +355,29 @@ def summarize_run(run: Path, state: str | None = None, write: bool = True) -> di
     return result
 
 
+def format_progress(run: Path, task: str, attempt: int) -> str:
+    """Show the current attempt's observed rate and lifecycle state."""
+    root = run / "eval_results" / task
+    details = next((item for item in read_task_attempts(root) if item["attempt"] == attempt), {})
+    episodes = details.get("episodes", [])
+    finished = [item for item in episodes if item.get("reason") in ("success", "step_limit")]
+    successes = sum(item.get("reason") == "success" for item in finished)
+    expected = details.get("config", {}).get(
+        "requested_episodes", read_json(run / "run_manifest.json", {}).get("num_episodes", "?")
+    )
+    rate = f"{successes / len(finished) * 100:.1f}%" if finished else "N/A"
+    terminal = details.get("terminal", {})
+    state = terminal.get("status")
+    if not state:
+        if episodes and episodes[-1].get("reason") not in ("success", "step_limit"):
+            state = episodes[-1].get("reason", "error")
+        else:
+            active = any((root / "episodes").glob(f"*_attempt_{attempt}/episode.json"))
+            active = active or any((root / "attempts" / f"attempt_{attempt}" / "episodes").glob("*/episode.json"))
+            state = "running" if episodes or active else "initializing"
+    return f"episodes {len(finished)}/{expected}, success {successes}, rate {rate} ({state})"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("init", "event", "summary", "progress"))
@@ -336,12 +412,7 @@ def main() -> None:
     elif args.command == "event":
         EventWriter(args.run / "scheduler_events.jsonl", {"run_id": args.run.name}).write(args.event, **fields)
     elif args.command == "progress":
-        root = args.run / "eval_results" / fields["task"] / "attempts" / f"attempt_{fields['attempt']}"
-        episodes = read_events(root / "episode_results.jsonl")
-        finished = [item for item in episodes if item.get("reason") in ("success", "step_limit")]
-        successes = sum(item.get("reason") == "success" for item in finished)
-        expected = read_json(args.run / "run_manifest.json", {}).get("num_episodes", "?")
-        print(f"episodes {len(finished)}/{expected}, success {successes}")
+        print(format_progress(args.run, fields["task"], fields["attempt"]))
     else:
         summarize_run(args.run, args.state)
 

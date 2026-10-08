@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .eval_logging import EventWriter, atomic_json, exception_fields, record
+from .eval_logging import EventWriter, atomic_json, episode_directory_name, exception_fields, record
 
 
 class InvalidActionError(ValueError):
@@ -41,12 +41,12 @@ def joint_metadata(env) -> dict:
 
 
 class EpisodeTrace:
-    def __init__(self, attempt_dir: Path, context: dict, enabled: bool) -> None:
+    def __init__(self, task_dir: Path, context: dict, enabled: bool) -> None:
         self.context = context
         self.enabled = enabled
-        self.directory = attempt_dir / "episodes" / f"episode_{context['episode_id']}_seed_{context['seed']}"
+        self.directory = task_dir / "episodes" / episode_directory_name(context)
         self.directory.mkdir(parents=True, exist_ok=False)
-        self.results = EventWriter(attempt_dir / "episode_results.jsonl", context)
+        self.results = EventWriter(task_dir / "episode_results.jsonl", context)
         self.inference = EventWriter(self.directory / "inference.jsonl", context)
         self.execution = EventWriter(self.directory / "execution.jsonl", context)
         self.started = time.monotonic()

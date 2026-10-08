@@ -9,11 +9,10 @@ from pathlib import Path
 from .eval_diagnostics import EpisodeTrace, InvalidActionError, execute_chunk, joint_metadata
 from .eval_logging import (
     EventWriter,
-    atomic_json,
     environment_info,
     exception_fields,
     prediction_path,
-    record,
+    read_task_attempts,
     summarize_run,
 )
 
@@ -197,7 +196,7 @@ def run_episode(
 def evaluate_task(
     env, args: dict, model, usr_args: dict, instruction_factory, unstable_error, video_size=None, video_fps="10"
 ):
-    attempt_dir = Path(usr_args["_attempt_dir"])
+    task_dir = Path(usr_args["_task_dir"])
     run = Path(usr_args["run_dir"]).resolve()
     context = {
         "run_id": run.name,
@@ -206,21 +205,20 @@ def evaluate_task(
         "slot": int(usr_args.get("slot", 0)),
     }
     enabled = usr_args.get("eval_trace", "full") == "full"
-    atomic_json(
-        attempt_dir / "task_config.json",
-        record(
-            context,
-            requested_episodes=int(usr_args.get("num_episodes", 100)),
-            user_args=usr_args,
-            resolved_config=args,
-            environment=environment_info(),
-            server_metadata=model.get_server_metadata(),
-        ),
+    if any(item["attempt"] == context["attempt"] for item in read_task_attempts(task_dir)):
+        raise FileExistsError(f"Refusing to reuse attempt {context['attempt']}: {task_dir}")
+    EventWriter(task_dir / "task_config.jsonl", context).write(
+        "task_config",
+        requested_episodes=int(usr_args.get("num_episodes", 100)),
+        user_args=usr_args,
+        resolved_config=args,
+        environment=environment_info(),
+        server_metadata=model.get_server_metadata(),
     )
     requested = int(usr_args.get("num_episodes", 100))
     if requested < 1:
         raise ValueError("num_episodes must be positive")
-    seeds = EventWriter(attempt_dir / "seed_checks.jsonl", context)
+    seeds = EventWriter(task_dir / "seed_checks.jsonl", context)
     env.suc, env.test_num = 0, 0
     seed = 100000 * (1 + int(usr_args["seed"]))
     args["eval_mode"] = True
@@ -265,7 +263,7 @@ def evaluate_task(
             if not accepted:
                 seed += 1
                 continue
-            trace = EpisodeTrace(attempt_dir, candidate, enabled)
+            trace = EpisodeTrace(task_dir, candidate, enabled)
             reason = run_episode(
                 env, args, model, usr_args, trace, instruction_factory, episode_info, video_size, video_fps
             )
@@ -283,7 +281,7 @@ def evaluate_task(
         error = exception_fields(exc, "task")
         raise
     finally:
-        atomic_json(attempt_dir / "attempt_result.json", record(context, status=status, **error))
+        EventWriter(task_dir / "attempt_results.jsonl", context).write("attempt_end", status=status, **error)
         # The launcher owns the run summary, avoiding concurrent task-level rewrites.
         if not usr_args.get("launcher_owned", False):
             summarize_run(run, status)

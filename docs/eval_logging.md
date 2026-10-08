@@ -29,6 +29,11 @@ python tools/analyze_eval_logs.py --run outputs/eval_outputs/<run> \
 对于自定义 `--inference_script`，full 模式要求服务支持下面的协议与启动参数；
 off 模式仍可使用不支持追踪的自定义服务。
 
+终端进度保留 `episodes 2/5, success 0, rate 0.0% (running)`，括号显示
+`initializing / running / complete / error / interrupted`，异常回合也可显示其终止原因。
+首个回合尚未完成时成功率显示 `N/A`。这里的成功率仅统计当前 attempt 已完成的
+策略回合；重试之间独立计数，正式成功率仍只采用完整 attempt。
+
 单独启动服务时传入 `--eval_run_dir <run> --eval_slot <slot>`，客户端传入
 `--run_dir <run> --attempt 1 --slot <slot> --eval_trace full`。
 两端必须访问同一运行目录：完整预测由服务写盘，客户端校验路径及文件存在后才执行。
@@ -51,17 +56,16 @@ off 模式仍可使用不支持追踪的自定义服务。
 ├── eval_results/<task>/
 │   ├── _result.txt                # 完整 attempt 的兼容成功率
 │   ├── task_summary.json
-│   └── attempts/attempt_<n>/
-│       ├── task_config.json
-│       ├── attempt_result.json
-│       ├── seed_checks.jsonl
-│       ├── episode_results.jsonl
-│       └── episodes/episode_<id>_seed_<seed>/
-│           ├── episode.json
-│           ├── inference.jsonl
-│           ├── execution.jsonl
-│           ├── predictions/request_<id>.npz
-│           └── episode<id>_<reason>.mp4
+│   ├── task_config.jsonl          # 每次启动/重试的实际配置，追加写入
+│   ├── attempt_results.jsonl      # 每次启动/重试的结束状态，追加写入
+│   ├── seed_checks.jsonl
+│   ├── episode_results.jsonl
+│   └── episodes/episode_<id>_seed_<seed>_attempt_<n>/
+│       ├── episode.json
+│       ├── inference.jsonl
+│       ├── execution.jsonl
+│       ├── predictions/request_<id>.npz
+│       └── episode<id>_<reason>.mp4
 └── analysis/
     ├── report.html
     ├── diagnostics.json          # 耗时、记录大小、阈值、读取警告
@@ -78,7 +82,9 @@ off 模式仍可使用不支持追踪的自定义服务。
 时间戳为带 UTC 时区的 ISO 时间；耗时使用单调时钟，单位毫秒。
 
 每个输出文件由一个进程负责写入，JSONL 每条 flush，NPZ 与 JSON 汇总原子替换。
-每次重试使用独立目录，已有预测和 episode 目录禁止覆盖。
+重试共用任务目录，配置、种子筛选及结果按 `attempt` 字段追加到任务级 JSONL。
+回合目录名带重试编号，已有预测和 episode 目录禁止覆盖；相同 attempt 编号禁止重复启动。
+汇总及分析工具仍可读取之前生成的 `attempts/attempt_<n>/` 旧日志，新运行不生成这两级目录。
 日志写入错误会使 attempt 失败，控制台和调度结果会明确反映错误。
 flush 和原子替换保障进程崩溃时的可读性，不表示断电级持久性承诺。
 
