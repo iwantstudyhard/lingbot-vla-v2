@@ -4,9 +4,11 @@ Run from the inference conda environment. Simulator runs in a separate interpret
 Only this launcher's own process groups are stopped. Training is untouched.
 """
 import argparse
+import ast
 from datetime import datetime
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -24,6 +26,44 @@ sys.path.insert(0, str(HERE))
 from common import json_write
 
 
+def validate_legacy_stats(stats, config):
+    """Validate fields actually consumed by FeatureTransform/Normalizer.
+
+    Released RoboTwin bounds stats lack min/max; those are only needed for
+    minmax normalization. Never fill in missing fields or change the file.
+    """
+    modes = {}
+    for entry in config.get("data", {}).get("norm_type", []):
+        modes.update(ast.literal_eval(entry) if isinstance(entry, str) else entry)
+    fields_by_mode = {
+        "bounds_99": ("q01", "q99"), "bounds_99_woclip": ("q01", "q99"),
+        "bounds_98": ("q02", "q98"), "bounds_98_woclip": ("q02", "q98"),
+        "meanstd": ("mean", "std"), "std": ("std",),
+        "minmax": ("min", "max"), "minmax_woclip": ("min", "max"),
+        "identity": (), "sincos": (),
+    }
+    for prefix in ("action", "observation.state"):
+        for joint, dimension in (("arm.position", 12), ("effector.position", 2)):
+            key = f"{prefix}.{joint}"
+            mode = modes.get(joint)
+            if mode not in fields_by_mode or (mode == "sincos" and prefix == "action"):
+                raise ValueError(f"Missing/unsupported legacy normalization mode: {key}={mode}")
+            row = stats.get("norm_stats", {}).get(key, {})
+            # FeatureTransform also uses mean length to build padding masks.
+            for name in set(("mean",) + fields_by_mode[mode]):
+                values = row.get(name)
+                if (not isinstance(values, list) or len(values) != dimension
+                        or any(not isinstance(v, (int, float)) or isinstance(v, bool)
+                               or not math.isfinite(v) for v in values)):
+                    raise ValueError(f"Invalid legacy normalization shape/values: {key}.{name}")
+            bounds = fields_by_mode[mode]
+            if mode.startswith(("bounds_", "minmax")) and any(
+                    low > high for low, high in zip(row[bounds[0]], row[bounds[1]])):
+                raise ValueError(f"Reversed legacy normalization bounds: {key}")
+            if "std" in bounds and any(value < 0 for value in row["std"]):
+                raise ValueError(f"Negative legacy normalization std: {key}")
+
+
 def normalization_preflight(model, override=None):
     """Use the SAME resolver as deployment, before allocating any GPU memory.
 
@@ -39,10 +79,14 @@ def normalization_preflight(model, override=None):
     resolved = Path(resolve_inference_normalization(
         model, config, override=str(override.resolve()) if override else None)).resolve()
     stats = json.loads(resolved.read_bytes())
-    # Despite its name, this validates the shared RoboTwin 12-arm+2-gripper
-    # feature shapes/finite values, not clean provenance or a particular count.
-    validate_clean_stats(stats)
+    audited = ((model.parent.parent.parent / "normalization/manifest.json").is_file()
+               or config.get("data", {}).get("require_normalization_contract", False))
+    if audited:
+        validate_clean_stats(stats)
+    else:
+        validate_legacy_stats(stats, config)
     return resolved, {"path": str(resolved), "count": stats.get("count"),
+                      "validation": "audited_clean" if audited else "legacy_runtime_fields",
                       "semantic_sha256": semantic_hash(stats)}
 
 
@@ -95,7 +139,7 @@ def main():
             norm_paths[label], norm_records[label] = normalization_preflight(getattr(args, label), override)
         except (ValueError, KeyError, OSError) as exc:
             hint = (" For the released legacy model, pass --official-norm with its original "
-                    "assets/norm_stats/robotwin.json; do not use clean stats.") if label == "official" else ""
+                    "assets/norm_stats/robotwin.json; do not use clean stats.") if label == "official" and override is None else ""
             raise SystemExit(f"{label} normalization preflight failed before GPU startup: {exc}.{hint}")
         print(f"[normalization] {label}: {norm_records[label]}", flush=True)
     if not args.sim_python.is_file():

@@ -244,7 +244,7 @@ class NormalizationPreflightTests(unittest.TestCase):
             for joint, dim in (("arm.position", 12), ("effector.position", 2)):
                 self.stats["norm_stats"][f"{prefix}.{joint}"] = {
                     name: [value] * dim for name, value in (
-                        ("mean", 0), ("std", 1), ("min", -1), ("max", 1),
+                        ("mean", 0), ("std", 1),
                         ("q01", -.9), ("q99", .9), ("q02", -.8), ("q98", .8))}
         self.original = Path(self.tmp.name) / "official_original.json"
         self.original.write_text(json.dumps(self.stats))
@@ -252,10 +252,16 @@ class NormalizationPreflightTests(unittest.TestCase):
 
     def write_config(self, required):
         (self.run / "lingbotvla_cli.yaml").write_text(json.dumps({
-            "data": {"require_normalization_contract": required, "norm_stats_file": None}}))
+            "data": {"require_normalization_contract": required, "norm_stats_file": None,
+                     "norm_type": ["{'arm.position': 'bounds_99_woclip'}",
+                                   {"effector.position": "bounds_99_woclip"}]}}))
 
     def snapshot(self):
         from lingbotvla.utils.normalization_contract import semantic_hash
+        self.stats["count"] = 548893
+        for row in self.stats["norm_stats"].values():
+            row["min"] = [-1] * len(row["mean"])
+            row["max"] = [1] * len(row["mean"])
         folder = self.run / "normalization"
         folder.mkdir()
         (folder / "norm_stats.json").write_text(json.dumps(self.stats))
@@ -272,12 +278,88 @@ class NormalizationPreflightTests(unittest.TestCase):
         path, metadata = self.module.normalization_preflight(self.hf, self.original)
         self.assertEqual(path, self.original.resolve())
         self.assertEqual(metadata["count"], 6062592)
+        self.assertEqual(metadata["validation"], "legacy_runtime_fields")
         self.assertEqual((self.run / "lingbotvla_cli.yaml").read_bytes(), config_before)
+
+    def test_real_repository_official_stats_without_min_max(self):
+        from lingbotvla.utils import normalization_contract
+        repo = Path(normalization_contract.__file__).resolve().parents[2]
+        original = repo / "assets/norm_stats/robotwin.json"
+        before = original.read_bytes()
+        stats = json.loads(before)
+        self.assertNotIn("min", stats["norm_stats"]["action.arm.position"])
+        path, metadata = self.module.normalization_preflight(self.hf, original)
+        self.assertEqual(path, original.resolve())
+        self.assertEqual(metadata["count"], 6062592)
+        self.assertEqual(metadata["semantic_sha256"],
+                         "0404d7cf69b5560a9adaedfb18b1f86715242ff3d7a0201f47face064eeefb5a")
+        self.assertEqual(original.read_bytes(), before)
+
+    def test_legacy_required_runtime_fields_still_checked(self):
+        import copy
+        for fault in ("missing", "shape", "nonfinite", "reversed", "mean"):
+            with self.subTest(fault=fault):
+                stats = copy.deepcopy(self.stats)
+                row = stats["norm_stats"]["action.arm.position"]
+                if fault == "missing":
+                    del row["q01"]
+                elif fault == "shape":
+                    row["q99"] = [1]
+                elif fault == "nonfinite":
+                    row["q99"][0] = float("nan")
+                elif fault == "reversed":
+                    row["q01"][0] = 10
+                else:
+                    del row["mean"]
+                self.original.write_text(json.dumps(stats))
+                with self.assertRaises(ValueError):
+                    self.module.normalization_preflight(self.hf, self.original)
+
+    def test_real_clean_stats_remain_separate_from_official_stats(self):
+        from lingbotvla.utils import normalization_contract
+        repo = Path(normalization_contract.__file__).resolve().parents[2]
+        canonical = repo / "assets/norm_stats/robotwin_clean_verified.json"
+        before = canonical.read_bytes()
+        self.write_config(True)
+        snapshot = self.snapshot()
+        snapshot.write_bytes(before)
+        stats = json.loads(before)
+        (snapshot.parent / "manifest.json").write_text(json.dumps({
+            "file": "norm_stats.json",
+            "semantic_sha256": normalization_contract.semantic_hash(stats)}))
+        path, metadata = self.module.normalization_preflight(self.hf)
+        self.assertEqual(path, snapshot.resolve())
+        self.assertEqual(metadata["count"], 548893)
+        self.assertEqual(metadata["semantic_sha256"],
+                         "fae488a9ee62a73c85a4d8913c8551ecce73f79b4d930dbdf3193f41286bb454")
+        self.assertEqual(canonical.read_bytes(), before)
+        with self.assertRaisesRegex(ValueError, "override disagrees"):
+            self.module.normalization_preflight(self.hf, repo / "assets/norm_stats/robotwin.json")
+
+    def test_legacy_minmax_still_requires_min_max(self):
+        config = {"data": {"norm_type": [{"arm.position": "minmax"},
+                                        {"effector.position": "minmax"}]}}
+        with self.assertRaisesRegex(ValueError, r"action.arm.position\.(min|max)"):
+            self.module.validate_legacy_stats(self.stats, config)
+
+    def test_audited_clean_missing_min_still_rejected(self):
+        self.write_config(True)
+        snapshot = self.snapshot()
+        from lingbotvla.utils.normalization_contract import semantic_hash
+        del self.stats["norm_stats"]["action.arm.position"]["min"]
+        snapshot.write_text(json.dumps(self.stats))
+        (snapshot.parent / "manifest.json").write_text(json.dumps({
+            "file": "norm_stats.json", "semantic_sha256": semantic_hash(self.stats)}))
+        with self.assertRaisesRegex(ValueError, r"action.arm.position.min"):
+            self.module.normalization_preflight(self.hf)
 
     def test_new_contract_still_uses_snapshot_and_rejects_wrong_override(self):
         self.write_config(True)
         snapshot = self.snapshot()
-        self.assertEqual(self.module.normalization_preflight(self.hf)[0], snapshot.resolve())
+        path, metadata = self.module.normalization_preflight(self.hf)
+        self.assertEqual(path, snapshot.resolve())
+        self.assertEqual(metadata["count"], 548893)
+        self.assertEqual(metadata["validation"], "audited_clean")
         other = json.loads(json.dumps(self.stats))
         other["norm_stats"]["action.arm.position"]["mean"][0] = .5
         self.original.write_text(json.dumps(other))

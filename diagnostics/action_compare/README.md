@@ -28,6 +28,9 @@ python diagnostics/action_compare/run.py \
 官方旧配置可能声明 `norm_stats_file: null`，因此必须显式传入 `--official-norm`。
 这个参数只给官方服务使用；我们的模型仍读取自己的 `normalization/norm_stats.json`，不会回退到官方混合统计。
 原归一化契约、哈希校验和拒绝不一致override的逻辑不变。
+官方旧版统计没有 `min/max`，预检查按保存配置中的归一化模式校验实际必需字段；
+`bounds_99_woclip` 检查 `q01/q99` 及映射所需的 `mean`，不凭空补字段。
+我们的 audited clean 快照仍执行完整严格校验，不能借旧格式兼容绕过契约。
 
 2026-10-08 已将本地 `assets/norm_stats/robotwin.json` 与官方仓库同文件核对一致：
 `count=6062592`，语义SHA256为 `0404d7cf69b5560a9adaedfb18b1f86715242ff3d7a0201f47face064eeefb5a`。
