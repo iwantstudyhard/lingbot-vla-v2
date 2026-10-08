@@ -39,6 +39,10 @@
 # ============================================================
 
 # ===== Parse keyword arguments =====
+raw_args=("$@")
+eval_trace=full
+run_finished=0
+logging_python=$(command -v python)
 script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$script_root" || exit 1
 export WORKSPACE="$(cd "${WORKSPACE:-$script_root}" && pwd)"
@@ -106,6 +110,7 @@ while [[ $# -gt 0 ]]; do
         --task_config)       task_config="$2";       shift 2 ;;
         --video_fps)         video_fps="$2";         shift 2 ;;
         --no_video)          enable_video=False;     shift ;;
+        --eval_trace)        eval_trace="$2"; shift 2 ;;
         --keep_inference)    keep_inference=true;    shift ;;
         --inference_env)     inference_env="$2";     shift 2 ;;
         --sim_env)           sim_env="$2";           shift 2 ;;
@@ -139,6 +144,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --keep_inference    keep inference servers resident after simulation"
             echo "  --video_fps         video recording fps (default: 10)"
             echo "  --no_video          disable video recording to speed up simulation"
+            echo "  --eval_trace        full (default) or off; full saves predictions and execution feedback"
             exit 0 ;;
         *)
             echo -e "\033[31mUnknown argument: $1\033[0m"; exit 1 ;;
@@ -181,6 +187,11 @@ if ! [[ "$progress_interval" =~ ^[0-9]+$ ]] || [ "$progress_interval" -lt 1 ]; t
     exit 1
 fi
 
+if [[ "$eval_trace" != full && "$eval_trace" != off ]]; then
+    echo "Error: --eval_trace must be full or off" >&2
+    exit 1
+fi
+
 # ===== Common environment =====
 # Policy servers are local.  Bypass HTTP(S) proxies explicitly; otherwise some
 # WebSocket versions may send ws://0.0.0.0/localhost handshakes to a configured
@@ -211,6 +222,7 @@ terminate_process_group() {
 }
 
 cleanup() {
+    local launcher_exit=${1:-$?}
     if [ "$cleanup_started" -eq 1 ]; then
         return
     fi
@@ -223,7 +235,9 @@ cleanup() {
     # Kill inference servers
     for slot in $(seq 0 $((${num_slots:-0}-1))); do
         local_pid=${inference_pids[$slot]:-0}
-        terminate_process_group "$local_pid" TERM
+        if ! $keep_inference || [ "$run_finished" -ne 1 ]; then
+            terminate_process_group "$local_pid" TERM
+        fi
     done
     # Kill eval workers
     for slot in $(seq 0 $((${num_slots:-0}-1))); do
@@ -233,21 +247,46 @@ cleanup() {
     sleep 1
     # Force kill survivors
     for slot in $(seq 0 $((${num_slots:-0}-1))); do
-        for local_pid in ${inference_pids[$slot]:-0} ${slot_pid[$slot]:-0}; do
-            terminate_process_group "$local_pid" KILL
-        done
+        terminate_process_group "${slot_pid[$slot]:-0}" KILL
+        if ! $keep_inference || [ "$run_finished" -ne 1 ]; then
+            terminate_process_group "${inference_pids[$slot]:-0}" KILL
+        fi
     done
+    if [ -f "${run_dir:-}/run_manifest.json" ]; then
+        for slot in $(seq 0 $((${num_slots:-0}-1))); do
+            local_pid=${slot_pid[$slot]:-0}
+            if [ "$local_pid" != 0 ]; then
+                wait "$local_pid"
+                local_worker_exit=$?
+                log_event task_exit "task=${slot_task[$slot]}" "attempt=$((task_retries[${slot_task[$slot]}]+1))" "slot=$slot" "exit_code=$local_worker_exit"
+            fi
+        done
+        log_event run_exit "exit_code=$launcher_exit"
+        local_final_state=failed
+        [ "${run_signal:-}" != "" ] && local_final_state=interrupted
+        [ "$run_finished" -eq 1 ] && local_final_state=finished
+        "$logging_python" "$script_root/deploy/eval_logging.py" summary --run "$run_dir" --state "$local_final_state" || echo "Failed to finalize evaluation summary" >&2
+    fi
     echo -e "\033[33m=== Cleanup done ===\033[0m"
 }
 
 handle_interrupt() {
-    cleanup
+    run_signal=INT
+    log_event run_signal "signal=INT"
+    cleanup 130
     exit 130
 }
 
 handle_terminate() {
-    cleanup
+    run_signal=TERM
+    log_event run_signal "signal=TERM"
+    cleanup 143
     exit 143
+}
+
+log_event() {
+    [ -f "${run_dir:-}/run_manifest.json" ] || return 0
+    "$logging_python" "$script_root/deploy/eval_logging.py" event --run "$run_dir" --event "$1" --fields "${@:2}" || exit 1
 }
 
 trap cleanup EXIT
@@ -361,6 +400,16 @@ eval_pid_file="${run_dir}/eval_pids.txt"
 > "$inference_pid_file"
 > "$eval_pid_file"
 stats_file="${run_dir}/stats.txt"
+"$logging_python" "$script_root/deploy/eval_logging.py" init --run "$run_dir" \
+    --fields "model_path=$model_path" "robotwin_dir=$eval_workdir" "inference_workdir=$inference_workdir" \
+    "qwen3vl_dir=$QWEN3VL_DIR" "num_episodes=$num_episodes" "num_gpus=$num_gpus" "num_per_gpu=$num_per_gpu" \
+    "num_slots=$num_slots" "use_length=$use_length" "use_bf16=$use_bf16" "use_fp32=$use_fp32" \
+    "use_compile=$use_compile" "task_config=$task_config" "eval_trace=$eval_trace" "robo_name=$robo_name" \
+    "video_enabled=$enable_video" "video_fps=$video_fps" "inference_env=$inference_env" "sim_env=$sim_env" \
+    "seed=$seed" "start_port=$start_port" "server_ready_timeout=$server_ready_timeout" \
+    --tasks "${task_queue[@]}" --raw-args "${raw_args[@]}" || exit 1
+log_event run_start
+
 echo -e "\033[36mRun directory: ${run_dir}\033[0m"
 
 # Result collection arrays
@@ -392,6 +441,10 @@ for slot in $(seq 0 $((num_slots-1))); do
         inference_script_for_module="${inference_script_for_module#${inference_workdir%/}/}"
     fi
     inference_module=$(echo "${inference_script_for_module}" | sed 's|/|.|g; s|\.py$||')
+    inference_trace_args=""
+    if [ "$eval_trace" = full ] || [ "$inference_module" = deploy.lingbot_vla_v2_policy ]; then
+        printf -v inference_trace_args '%q ' --eval_run_dir "$run_dir" --eval_slot "$slot"
+    fi
     setsid bash -c "source ${conda_sh} && conda activate ${inference_env} && SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 python -m ${inference_module} \
         --model_path '${model_path}' \
         --use_length '${use_length}' \
@@ -399,10 +452,12 @@ for slot in $(seq 0 $((num_slots-1))); do
         --use_bf16 "${use_bf16}" \
         --use_fp32 "${use_fp32}" \
         --use_compile "${use_compile}" \
+        ${inference_trace_args} \
         --port '${port}'" > "$log_file" 2>&1 &
 
     pid=$!
     echo "${pid}" >> "$inference_pid_file"
+    log_event server_start "slot=$slot" "gpu=$gpu_id" "port=$port" "pid=$pid"
 done
 
 echo -e "\033[32m${num_slots} inference servers started, PIDs saved to ${inference_pid_file}\033[0m"
@@ -437,6 +492,7 @@ for slot in $(seq 0 $((num_slots-1))); do
     while true; do
         if ! kill -0 "$local_pid" 2>/dev/null; then
             echo -e "\033[31mError: inference server slot ${slot} exited before becoming ready.\033[0m"
+            log_event server_failure "slot=$slot" "port=$port"
             tail -n 100 "$log_file" 2>/dev/null || true
             exit 1
         fi
@@ -444,10 +500,12 @@ for slot in $(seq 0 $((num_slots-1))); do
         # Clear them only for this probe; policy and simulator retain their paths.
         if env -u LD_LIBRARY_PATH curl --noproxy '*' --silent --fail --max-time 2 "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1; then
             echo -e "\033[32m[inf slot $slot] Policy server is ready.\033[0m"
+            log_event server_ready "slot=$slot" "port=$port"
             break
         fi
         if [ "$(date +%s)" -ge "$deadline" ]; then
             echo -e "\033[31mError: inference server slot ${slot} was not ready within ${server_ready_timeout}s.\033[0m"
+            log_event server_failure "slot=$slot" "port=$port"
             tail -n 100 "$log_file" 2>/dev/null || true
             exit 1
         fi
@@ -483,7 +541,7 @@ fi
 deploy_pkg_src="${inference_workdir%/}/deploy"
 deploy_pkg_dst="${eval_workdir}/script/deploy"
 mkdir -p "$deploy_pkg_dst"
-for f in __init__.py websocket_client_policy.py msgpack_numpy.py; do
+for f in __init__.py websocket_client_policy.py msgpack_numpy.py eval_logging.py eval_diagnostics.py robotwin_evaluation.py; do
     if [ ! -f "$deploy_pkg_src/$f" ]; then
         echo -e "\033[31mError: deploy helper source not found: ${deploy_pkg_src}/${f}\033[0m"
         exit 1
@@ -579,7 +637,7 @@ launch_task() {
     PYTHONWARNINGS=ignore::UserWarning \
     XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
     SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 \
-    setsid bash -c "source ${conda_sh} && conda activate ${sim_env} && export PYTHONPATH=\"\$(python -c 'import site;print(site.getsitepackages()[0])')\${PYTHONPATH:+:\$PYTHONPATH}\" && PYTHONUNBUFFERED=1 PYTHONWARNINGS=ignore::UserWarning XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 python -u ${eval_client_dst} --config policy/${policy_name}/deploy_policy.yml \
+    setsid bash -c "source ${conda_sh} && conda activate ${sim_env} && export PYTHONPATH=\"\$(python -c 'import site;print(site.getsitepackages()[0])')\${PYTHONPATH:+:\$PYTHONPATH}\" && PYTHONUNBUFFERED=1 PYTHONWARNINGS=ignore::UserWarning XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 python -u ${eval_client_dst} --config '${eval_workdir}/policy/${policy_name}/deploy_policy.yml' \
         --overrides \
         --task_name ${task_name} \
         --task_config ${task_config} \
@@ -591,9 +649,15 @@ launch_task() {
         --robo_name ${robo_name} \
         --video_fps ${video_fps} \
         --eval_video_log ${enable_video} \
+        --eval_trace '${eval_trace}' \
+        --run_dir '${run_dir}' \
+        --attempt '${attempt}' \
+        --slot '${slot}' \
+        --launcher_owned True \
         --output_dir '${run_dir}/eval_results'" >> "$log_file" 2>&1 &
 
     local pid=$!
+    log_event task_start "task=$task_name" "attempt=$attempt" "slot=$slot" "gpu=$gpu_id" "port=$port" "pid=$pid"
     echo "${pid}" >> "$eval_pid_file"
     slot_pid[$slot]=$pid
     slot_task[$slot]="$task_name"
@@ -617,6 +681,7 @@ shutdown_inference_slot() {
         kill "$inf_pid" 2>/dev/null
         echo -e "\033[36m  [release] slot $slot inference server (PID: ${inf_pid}) stopped, remaining: $((active_inference - 1))\033[0m"
     fi
+    log_event server_stop "slot=$slot" "pid=$inf_pid"
     inference_pids[$slot]=0
     active_inference=$((active_inference - 1))
 }
@@ -665,15 +730,7 @@ report_progress() {
         attempt=$(( task_retries[$task_name] + 1 ))
         progress_text="episodes 0/${num_episodes} (initializing)"
 
-        if [ -f "$log_file" ]; then
-            rate_line=$(tail -n 300 "$log_file" | sed 's/\x1b\[[0-9;]*m//g' | grep -oP 'Success rate: \K.*' | tail -1)
-            if [ -n "$rate_line" ]; then
-                suc_num=$(echo "$rate_line" | grep -oP '^\d+' | head -1)
-                done_ep=$(echo "$rate_line" | grep -oP '/\K\d+' | head -1)
-                rate_pct=$(echo "$rate_line" | grep -oP '=> \K[\d.]+' | head -1)
-                progress_text="episodes ${done_ep}/${num_episodes}, success ${suc_num}, rate ${rate_pct}%"
-            fi
-        fi
+        progress_text=$("$logging_python" "$script_root/deploy/eval_logging.py" progress --run "$run_dir" --fields "task=$task_name" "attempt=$attempt") || exit 1
 
         echo "  slot ${slot} / GPU $((slot % num_gpus)): ${task_name} — ${progress_text}, attempt ${attempt}/${max_retries}, elapsed ${elapsed}s"
     done
@@ -698,6 +755,8 @@ while [ $((completed + skipped)) -lt $total_tasks ] && has_running; do
             task_name="${slot_task[$slot]}"
             log_file="${slot_log[$slot]}"
 
+            log_event task_exit "task=$task_name" "attempt=$((task_retries[$task_name]+1))" "slot=$slot" "exit_code=$exit_code" "duration_s=$task_duration"
+            "$logging_python" "$script_root/deploy/eval_logging.py" summary --run "$run_dir" || exit 1
             if [ $exit_code -eq 0 ]; then
                 completed=$((completed + 1))
                 echo -e "\033[32m  [done] ${task_name} slot $slot took ${task_duration}s (progress ${completed}/${total_tasks})\033[0m"
@@ -720,6 +779,7 @@ while [ $((completed + skipped)) -lt $total_tasks ] && has_running; do
                 task_retries[$task_name]=$((task_retries[$task_name] + 1))
                 if [ ${task_retries[$task_name]} -lt $max_retries ]; then
                     echo -e "\033[31m  [fail] ${task_name} slot $slot took ${task_duration}s exit=${exit_code}, retrying on this slot (${task_retries[$task_name]}/${max_retries})\033[0m"
+                    log_event task_retry "task=$task_name" "attempt=$((task_retries[$task_name]+1))" "slot=$slot"
                     # Retry immediately on the same slot
                     launch_task $slot "$task_name"
                 else
@@ -777,86 +837,10 @@ fi
 # ============================================================
 echo -e "\033[36mGenerating stats file: ${stats_file}\033[0m"
 
-{
-    echo "============================================"
-    echo "  Eval Result Stats"
-    echo "  Time: $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "  Model: ${_exp_name}_${_step_k}"
-    echo "  Model path: ${model_path}"
-    echo "  Tasks: ${num_tasks}"
-    echo "  Episodes per task: ${num_episodes}"
-    echo "  Console progress interval: ${progress_interval}s"
-    echo "  Task Config: ${task_config}"
-    echo "  Inference: ${num_gpus} GPU x ${num_per_gpu}/GPU = ${num_slots} slots"
-    echo "  Precision: use_bf16=${use_bf16}, use_fp32=${use_fp32}, use_compile=${use_compile}"
-    echo "  Control: use_length=${use_length} (model action horizon=50), chunk_ret=True"
-    echo "  Server readiness timeout: ${server_ready_timeout}s"
-    echo "  Video: enabled=${enable_video}, fps=${video_fps}, per-action refresh=True"
-    echo "  Result: ${completed} done, ${skipped} skipped"
-    echo "============================================"
-    echo ""
-    printf "%-30s %-10s %-14s %-14s %-10s\n" "Task" "Time(s)" "Done(${num_episodes})" "Success/Total" "Rate"
-    echo "--------------------------------------------------------------------------------"
-
-    total_success=0
-    total_episodes=0
-    all_complete=true
-
-    for i in "${!result_task_names[@]}"; do
-        task_name="${result_task_names[$i]}"
-        duration="${result_durations[$i]}"
-        log_file="${result_logs[$i]}"
-        status="${result_status[$i]}"
-
-        # Extract success rate from the log (strip ANSI color codes)
-        success_rate="-"
-        episodes_done="-"
-        if [ -f "$log_file" ]; then
-            last_rate_line=$(sed 's/\x1b\[[0-9;]*m//g' "$log_file" | grep -oP 'Success rate: \K.*' | tail -1)
-            if [ -n "$last_rate_line" ]; then
-                suc_num=$(echo "$last_rate_line" | grep -oP '^\d+' | head -1)
-                total_num=$(echo "$last_rate_line" | grep -oP '/\K\d+' | head -1)
-                rate_pct=$(echo "$last_rate_line" | grep -oP '=> \K[\d.]+')
-                if [ -n "$suc_num" ] && [ -n "$total_num" ]; then
-                    success_rate="${rate_pct}%"
-                    episodes_done="${suc_num}/${total_num}"
-                    total_success=$((total_success + suc_num))
-                    total_episodes=$((total_episodes + total_num))
-                fi
-            fi
-        fi
-
-        # Check whether the requested number of episodes ran.
-        if [ "$episodes_done" != "-" ]; then
-            total_ep=$(echo "$episodes_done" | cut -d'/' -f2)
-            if [ "$total_ep" = "$num_episodes" ]; then
-                complete_mark="YES"
-            else
-                complete_mark="NO(${total_ep}/${num_episodes})"
-                all_complete=false
-            fi
-        else
-            complete_mark="NO(0/${num_episodes})"
-            all_complete=false
-        fi
-
-        printf "%-30s %-10s %-14s %-14s %-10s\n" "$task_name" "$duration" "$complete_mark" "$episodes_done" "$success_rate"
-    done
-
-    echo "--------------------------------------------------------------------------------"
-    if [ $total_episodes -gt 0 ]; then
-        overall_rate=$(awk "BEGIN {printf \"%.1f\", $total_success/$total_episodes*100}")
-    else
-        overall_rate="0.0"
-    fi
-    printf "Summary: total %ds, success %d/%d, overall rate %s%%\n" "$total_duration" "$total_success" "$total_episodes" "$overall_rate"
-    if $all_complete; then
-        echo "All tasks fully executed ${num_episodes} episodes"
-    else
-        echo "Warning: some tasks did not complete ${num_episodes} episodes; check logs"
-    fi
-    echo "============================================"
-} | tee "$stats_file"
+"$logging_python" "$script_root/deploy/eval_logging.py" summary --run "$run_dir" --state finished || exit 1
+cat "$stats_file"
+run_finished=1
+log_event run_finished
 
 # ============================================================
 # Phase 5: handle inference servers (stop the remaining ones)
@@ -874,6 +858,7 @@ else
         inf_pid=${inference_pids[$slot]}
         if [ "$inf_pid" != "0" ] && kill -0 "$inf_pid" 2>/dev/null; then
             kill "$inf_pid" 2>/dev/null
+            log_event server_stop "slot=$slot" "pid=$inf_pid"
             echo -e "\033[36m  slot $slot inference server (PID: ${inf_pid}) stopped\033[0m"
         fi
     done
