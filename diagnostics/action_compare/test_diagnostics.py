@@ -166,9 +166,11 @@ class ServerWrapperTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             stats_path = Path(tmp) / "stats.json"
             stats_path.write_text('{"count": 548893}')
+            init_overrides = []
 
             class FakePolicy:
                 def __init__(self, *pos, **kw):
+                    init_overrides.append(kw.get("robot_norm_path"))
                     self.robot_norm_path = str(stats_path)
                     self.config = types.SimpleNamespace(chunk_size=50, num_steps=10)
                     self.data_config = types.SimpleNamespace(img_size=256)
@@ -218,11 +220,74 @@ class ServerWrapperTests(unittest.TestCase):
             norm_module = types.ModuleType("lingbotvla.utils.normalization_contract")
             norm_module.semantic_hash = lambda data: "unit-test-hash"
             argv = ["server.py", "--model", tmp, "--label", "ours", "--port", "10000",
-                    "--token", "unit-test", "--manifest", str(Path(tmp) / "manifest.json")]
+                    "--token", "unit-test", "--manifest", str(Path(tmp) / "manifest.json"),
+                    "--norm-stats", str(stats_path)]
             with patch.dict(sys.modules, {policy_module.__name__: policy_module,
                                           ws_module.__name__: ws_module, norm_module.__name__: norm_module}), \
                  patch.object(sys, "argv", argv):
                 module.main()
+            self.assertEqual(init_overrides, [str(stats_path.resolve())])
+
+
+class NormalizationPreflightTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("diag_run", HERE / "run.py")
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.run = Path(self.tmp.name) / "run"
+        self.hf = self.run / "checkpoints/global_step_18000/hf_ckpt"
+        self.hf.mkdir(parents=True)
+        self.stats = {"count": 6062592, "norm_stats": {}}
+        for prefix in ("action", "observation.state"):
+            for joint, dim in (("arm.position", 12), ("effector.position", 2)):
+                self.stats["norm_stats"][f"{prefix}.{joint}"] = {
+                    name: [value] * dim for name, value in (
+                        ("mean", 0), ("std", 1), ("min", -1), ("max", 1),
+                        ("q01", -.9), ("q99", .9), ("q02", -.8), ("q98", .8))}
+        self.original = Path(self.tmp.name) / "official_original.json"
+        self.original.write_text(json.dumps(self.stats))
+        self.write_config(False)
+
+    def write_config(self, required):
+        (self.run / "lingbotvla_cli.yaml").write_text(json.dumps({
+            "data": {"require_normalization_contract": required, "norm_stats_file": None}}))
+
+    def snapshot(self):
+        from lingbotvla.utils.normalization_contract import semantic_hash
+        folder = self.run / "normalization"
+        folder.mkdir()
+        (folder / "norm_stats.json").write_text(json.dumps(self.stats))
+        (folder / "manifest.json").write_text(json.dumps({
+            "file": "norm_stats.json", "semantic_sha256": semantic_hash(self.stats)}))
+        return folder / "norm_stats.json"
+
+    def test_legacy_null_path_fails_before_gpu_startup(self):
+        with self.assertRaisesRegex(ValueError, "Legacy normalization file missing"):
+            self.module.normalization_preflight(self.hf)
+
+    def test_legacy_explicit_stats_resolve_without_editing_config(self):
+        config_before = (self.run / "lingbotvla_cli.yaml").read_bytes()
+        path, metadata = self.module.normalization_preflight(self.hf, self.original)
+        self.assertEqual(path, self.original.resolve())
+        self.assertEqual(metadata["count"], 6062592)
+        self.assertEqual((self.run / "lingbotvla_cli.yaml").read_bytes(), config_before)
+
+    def test_new_contract_still_uses_snapshot_and_rejects_wrong_override(self):
+        self.write_config(True)
+        snapshot = self.snapshot()
+        self.assertEqual(self.module.normalization_preflight(self.hf)[0], snapshot.resolve())
+        other = json.loads(json.dumps(self.stats))
+        other["norm_stats"]["action.arm.position"]["mean"][0] = .5
+        self.original.write_text(json.dumps(other))
+        with self.assertRaisesRegex(ValueError, "override disagrees"):
+            self.module.normalization_preflight(self.hf, self.original)
+
+    def test_required_snapshot_still_refuses_legacy_fallback(self):
+        self.write_config(True)
+        with self.assertRaisesRegex(ValueError, "no normalization snapshot"):
+            self.module.normalization_preflight(self.hf, self.original)
 
 
 if __name__ == "__main__":

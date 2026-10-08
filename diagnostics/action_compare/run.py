@@ -6,6 +6,7 @@ Only this launcher's own process groups are stopped. Training is untouched.
 import argparse
 from datetime import datetime
 import importlib.util
+import json
 import os
 from pathlib import Path
 import signal
@@ -18,14 +19,39 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
 from common import json_write
+
+
+def normalization_preflight(model, override=None):
+    """Use the SAME resolver as deployment, before allocating any GPU memory.
+
+    Legacy stats must be explicitly available, never silently replaced by clean
+    stats. A new run's snapshot hash and override restrictions stay enforced.
+    """
+    import yaml
+    from lingbotvla.utils.normalization_contract import (
+        resolve_inference_normalization, semantic_hash, validate_clean_stats,
+    )
+    config_path = model.parent.parent.parent / "lingbotvla_cli.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    resolved = Path(resolve_inference_normalization(
+        model, config, override=str(override.resolve()) if override else None)).resolve()
+    stats = json.loads(resolved.read_bytes())
+    # Despite its name, this validates the shared RoboTwin 12-arm+2-gripper
+    # feature shapes/finite values, not clean provenance or a particular count.
+    validate_clean_stats(stats)
+    return resolved, {"path": str(resolved), "count": stats.get("count"),
+                      "semantic_sha256": semantic_hash(stats)}
 
 
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ours", type=Path, required=True)
     parser.add_argument("--official", type=Path, required=True)
+    parser.add_argument("--official-norm", type=Path, default=None,
+                        help="Official model's original stats, e.g. assets/norm_stats/robotwin.json; not clean stats")
     parser.add_argument("--sim-python", type=Path, required=True)
     parser.add_argument("--robotwin", type=Path, default=ROOT / "RoboTwin")
     parser.add_argument("--qwen", type=Path, default=None)
@@ -62,6 +88,16 @@ def main():
         if not (model.parent.parent.parent / "lingbotvla_cli.yaml").is_file():
             raise SystemExit(f"Missing saved training config for {model}")
         setattr(args, label, model)
+    norm_paths, norm_records = {}, {}
+    for label in ("ours", "official"):
+        override = args.official_norm if label == "official" else None
+        try:
+            norm_paths[label], norm_records[label] = normalization_preflight(getattr(args, label), override)
+        except (ValueError, KeyError, OSError) as exc:
+            hint = (" For the released legacy model, pass --official-norm with its original "
+                    "assets/norm_stats/robotwin.json; do not use clean stats.") if label == "official" else ""
+            raise SystemExit(f"{label} normalization preflight failed before GPU startup: {exc}.{hint}")
+        print(f"[normalization] {label}: {norm_records[label]}", flush=True)
     if not args.sim_python.is_file():
         raise SystemExit(f"Missing simulator Python: {args.sim_python}")
     if not (args.robotwin / "env_cfg/task_config/demo_clean.yml").is_file():
@@ -85,7 +121,8 @@ def main():
     run = args.output.resolve() / (datetime.now().strftime("%Y%m%d_%H%M%S_") + token[:8])
     run.mkdir(parents=True, exist_ok=False)
     json_write(run / "launch.json", {**{k: str(v) if isinstance(v, Path) else v
-                                       for k, v in vars(args).items()}, "diagnostic_token": token})
+                                       for k, v in vars(args).items()}, "diagnostic_token": token,
+                                    "normalization_preflight": norm_records})
     env = os.environ.copy()
     env.update(WORKSPACE=str(ROOT), ROBOTWIN_DIR=str(args.robotwin.resolve()),
                QWEN3VL_DIR=str(qwen.resolve()), QWEN3VL_PATH=str(qwen.resolve()),
@@ -114,6 +151,7 @@ def main():
             servers[label] = spawn([
                 sys.executable, "-u", str(HERE / "server.py"), "--model", str(getattr(args, label)),
                 "--label", label, "--port", str(args.port + i), "--token", token,
+                "--norm-stats", str(norm_paths[label]),
                 "--manifest", str(run / f"{label}_server.json")], run / f"{label}_server.log", gpus[i])
             print(f"[server] {label} physical GPU {gpus[i]}, port {args.port + i}", flush=True)
         deadline = time.monotonic() + args.ready_timeout

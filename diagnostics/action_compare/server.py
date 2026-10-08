@@ -22,6 +22,8 @@ def main():
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--token", required=True)
     parser.add_argument("--manifest", required=True)
+    parser.add_argument("--norm-stats", type=Path, default=None,
+                        help="Explicit normalization for legacy models; audited contracts still enforced")
     args = parser.parse_args()
 
     from deploy.lingbot_vla_v2_policy import LingbotVLAv2Server, set_seed_everywhere
@@ -58,7 +60,9 @@ def main():
                 result["diagnostic_seed"] = seed
             return result
 
-    policy = DiagnosticPolicy(args.model, use_length=50, chunk_ret=True,
+    policy = DiagnosticPolicy(args.model,
+                              robot_norm_path=str(args.norm_stats.resolve()) if args.norm_stats else None,
+                              use_length=50, chunk_ret=True,
                               use_bf16=False, use_fp32=True, use_compile=False)
     stats_path = Path(policy.robot_norm_path).resolve()
     stats = json.loads(stats_path.read_text(encoding="utf-8"))

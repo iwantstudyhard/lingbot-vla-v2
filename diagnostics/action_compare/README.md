@@ -15,6 +15,7 @@ conda activate lingbotvla
 python diagnostics/action_compare/run.py \
   --ours /scratch/lingbot_ws/lingbot-vla-v2/outputs/train_outputs/robotwin_clean_stage1_20261001_021839_b6a91337/checkpoints/global_step_18000/hf_ckpt \
   --official /scratch/lingbot_ws/lingbot-vla-v2/models/lingbot-vla-v2-6b-robotwin/lingbot-vla-v2-6b-robotwin/checkpoints/global_step_50000/hf_ckpt \
+  --official-norm /scratch/lingbot_ws/lingbot-vla-v2/assets/norm_stats/robotwin.json \
   --qwen /scratch/lingbot_ws/lingbot-vla-v2/models/Qwen3-VL-4B-Instruct/snapshots/master \
   --sim-python /home/kemove/miniforge3/envs/RoboTwin/bin/python \
   --gpus 2,3 --task hanging_mug --use-length 20 --max-actions 160
@@ -23,6 +24,14 @@ python diagnostics/action_compare/run.py \
 默认 FP32、关闭 compile、固定场景种子（从 100000 开始，通过原评测器的合法场景检查）。
 每次推理两模型使用相同采样种子，便于对照；这是诊断专用设置，不等同于默认随机采样的正式评测。
 执行前检查输入模型、Qwen、配置、端口；不会杀其他进程，不会改模型路径或归一化文件。
+加载GPU权重前先用正式推理的同一个解析器核验两份归一化路径和内容，主终端输出各自路径、count和语义哈希。
+官方旧配置可能声明 `norm_stats_file: null`，因此必须显式传入 `--official-norm`。
+这个参数只给官方服务使用；我们的模型仍读取自己的 `normalization/norm_stats.json`，不会回退到官方混合统计。
+原归一化契约、哈希校验和拒绝不一致override的逻辑不变。
+
+2026-10-08 已将本地 `assets/norm_stats/robotwin.json` 与官方仓库同文件核对一致：
+`count=6062592`，语义SHA256为 `0404d7cf69b5560a9adaedfb18b1f86715242ff3d7a0201f47face064eeefb5a`。
+服务器文件也应核对该语义哈希，不只看名字或count。它仅用于发布的官方模型，不可替换我们clean模型的统计。
 运行期间有逐动作进度，每10秒在主终端显示一次。遇到初始化异常打印完整堆栈并退出，不再无限换种子重试。
 默认每个模型最多执行160个动作，便于尽快检查抖动。达到上限会标记 `diagnostic_truncated`，
 此时失败不代表完整任务失败，不能拿结果计算正式成功率。要完整跑一回合使用 `--max-actions 0`。
