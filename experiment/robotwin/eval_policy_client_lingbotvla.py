@@ -27,6 +27,7 @@ import yaml
 from datetime import datetime
 import importlib
 import argparse
+import json
 import pdb
 
 from generate_episode_instructions import *
@@ -140,6 +141,7 @@ def main(usr_args):
         if save_dir.exists():
             raise ValueError(f"Refusing to reuse eval results: {save_dir}")
     save_dir.mkdir(parents=True, exist_ok=True)
+    usr_args["smoothing_trace_dir"] = str(save_dir)
 
     # 命令行 --eval_video_log 优先于 YAML 配置
     if "eval_video_log" in usr_args:
@@ -227,6 +229,24 @@ def eval_policy(task_name,
                 usr_args = None):
     print(f"\033[34mTask Name: {args['task_name']}\033[0m")
     print(f"\033[34mPolicy Name: {args['policy_name']}\033[0m")
+
+    # Prefer the maintained repository copy, including diagnostic runs that do
+    # not invoke the launcher's helper synchronization into RoboTwin/script.
+    sys.path.insert(0, str(WORKSPACE))
+    from deploy.action_smoothing import RoboTwinActionSmoother
+    options = usr_args or {}
+    smoother = RoboTwinActionSmoother(
+        mode=options.get("action_smoothing", "none"),
+        alpha=float(options.get("smoothing_alpha", 0.35)),
+        window=int(options.get("smoothing_window", 5)),
+        max_delta=float(options.get("smoothing_max_delta", 0.05)),
+    )
+    smoothing_trace = Path(args.get("eval_video_save_dir") or options.get("smoothing_trace_dir", ".")) / "action_smoothing.jsonl"
+    # output_dir is the shared eval_results root, even when video is disabled.
+    if options.get("output_dir"):
+        trace_root = Path(os.path.expandvars(str(options["output_dir"]))).expanduser()
+        smoothing_trace = (trace_root if trace_root.is_absolute() else WORKSPACE / trace_root) / task_name / "action_smoothing.jsonl"
+    print(f"Action smoothing: {smoother.config()}", flush=True)
 
     expert_check = True
     TASK_ENV.suc = 0
@@ -324,9 +344,19 @@ def eval_policy(task_name,
         if usr_args is not None and "new_ckpt_path" in usr_args:
             path_to_pi_model = usr_args['new_ckpt_path']
         ret = model.infer(dict(reset = True, robo_name=usr_args['robo_name'], path_to_pi_model=path_to_pi_model))
+        smoother.reset()
+        smoothing_initialized = False
+        if smoother.enabled:
+            smoothing_trace.parent.mkdir(parents=True, exist_ok=True)
+            with smoothing_trace.open("a", encoding="utf-8") as trace:
+                trace.write(json.dumps(dict(event="episode_start", episode=TASK_ENV.test_num,
+                                            scene_seed=now_seed, config=smoother.config())) + "\n")
         
         while TASK_ENV.take_action_cnt<TASK_ENV.step_lim and not succ:
             observation = TASK_ENV.get_obs()
+            if smoother.enabled and not smoothing_initialized:
+                smoother.reset(observation["joint_action"]["vector"])
+                smoothing_initialized = True
             # from IPython import embed;embed()
             
             formatted_observation = {
@@ -356,15 +386,28 @@ def eval_policy(task_name,
             # from IPython import embed;embed()
             ret = model.infer(formatted_observation) #(TASK_ENV, model, observation)
             action, latency = ret['action'], ret['server_timing']
+            raw_actions = np.asarray(action)
+            single_action = raw_actions.ndim == 1
+            raw_chunk = raw_actions[None, :] if single_action else raw_actions
+            action_chunk = smoother.prepare_chunk(raw_chunk)
+            smoothing_records = []
             if len(action.shape) == 2:
-                for action_index, act in enumerate(action):
+                for action_index, act in enumerate(action_chunk):
+                    if TASK_ENV.take_action_cnt >= TASK_ENV.step_lim:
+                        break
                     # get_obs() also renders/writes the evaluation frame.  The
                     # outer loop captured the frame for the first action; refresh
                     # before every later action so a returned action chunk does
                     # not become one frozen frame repeated in the output video.
                     if action_index > 0 and TASK_ENV.eval_video_path is not None:
                         TASK_ENV.get_obs()
-                    TASK_ENV.take_action(act)
+                    filtered = smoother.filter_action(act)
+                    before_count = TASK_ENV.take_action_cnt
+                    TASK_ENV.take_action(filtered)
+                    if smoother.enabled:
+                        smoothing_records.append(dict(event="action", episode=TASK_ENV.test_num, scene_seed=now_seed,
+                                                      action_index=before_count, raw_action=raw_chunk[action_index].tolist(),
+                                                      windowed_action=act.tolist(), executed_action=filtered.tolist()))
                     if TASK_ENV.eval_success:
                         succ = True
                         # Preserve the reached success state as the final frame.
@@ -372,12 +415,22 @@ def eval_policy(task_name,
                             TASK_ENV.get_obs()
                         break
             else:
-                TASK_ENV.take_action(action)
+                filtered = smoother.filter_action(action_chunk[0])
+                before_count = TASK_ENV.take_action_cnt
+                TASK_ENV.take_action(filtered)
+                if smoother.enabled:
+                    smoothing_records.append(dict(event="action", episode=TASK_ENV.test_num, scene_seed=now_seed,
+                                                  action_index=before_count, raw_action=raw_chunk[0].tolist(),
+                                                  windowed_action=action_chunk[0].tolist(), executed_action=filtered.tolist()))
                 if TASK_ENV.eval_success:
                     succ = True
                     if TASK_ENV.eval_video_path is not None:
                         TASK_ENV.get_obs()
             
+            if smoothing_records:
+                with smoothing_trace.open("a", encoding="utf-8") as trace:
+                    for record in smoothing_records:
+                        trace.write(json.dumps(record, allow_nan=False) + "\n")
             print(f"infer time {latency}")
 
 

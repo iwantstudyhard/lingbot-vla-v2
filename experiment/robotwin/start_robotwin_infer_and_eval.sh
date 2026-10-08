@@ -21,8 +21,13 @@
 #   --task_offset       number of tasks to skip from the start of the task list (default: 0)
 #   --skip_task         task name to exclude from the selected range (repeatable via comma-separated names)
 #   --num_gpus          total GPUs (default: 1)
+#   --gpu_ids           explicit physical GPU IDs (e.g. 2,3; count must match num_gpus)
 #   --num_per_gpu       inference servers per GPU (default: 1)
 #   --use_length        actions executed before replanning (default: 10; model horizon: 50)
+#   --action_smoothing  none (default) or ema; inference postprocessing only
+#   --smoothing_alpha   EMA new-target weight (default: 0.35)
+#   --smoothing_window  positive odd moving-average window (default: 5)
+#   --smoothing_max_delta max arm target change in rad/action; 0 disables (default: 0.05)
 #   --server_ready_timeout seconds to wait for policy servers to become healthy (default: 1800)
 #   --robo_name         robot config name (default: robotwin)
 #   --video_fps         video recording fps (default: 10)
@@ -68,8 +73,13 @@ progress_interval=30
 task_offset=0
 skip_task=""
 num_gpus=1
+gpu_ids=""
 num_per_gpu=1
 use_length=10
+action_smoothing=none
+smoothing_alpha=0.35
+smoothing_window=5
+smoothing_max_delta=0.05
 server_ready_timeout=1800
 use_bf16=False
 use_fp32=True
@@ -96,8 +106,13 @@ while [[ $# -gt 0 ]]; do
         --task_offset)       task_offset="$2";       shift 2 ;;
         --skip_task)         skip_task="$2";         shift 2 ;;
         --num_gpus)          num_gpus="$2";          shift 2 ;;
+        --gpu_ids)           gpu_ids="$2";           shift 2 ;;
         --num_per_gpu)       num_per_gpu="$2";       shift 2 ;;
         --use_length)        use_length="$2";        shift 2 ;;
+        --action_smoothing)  action_smoothing="$2"; shift 2 ;;
+        --smoothing_alpha)   smoothing_alpha="$2"; shift 2 ;;
+        --smoothing_window)  smoothing_window="$2"; shift 2 ;;
+        --smoothing_max_delta) smoothing_max_delta="$2"; shift 2 ;;
         --server_ready_timeout) server_ready_timeout="$2"; shift 2 ;;
         --use_bf16)          use_bf16="$2";        shift 2 ;;
         --use_fp32)          use_fp32="$2";        shift 2 ;;
@@ -128,8 +143,13 @@ while [[ $# -gt 0 ]]; do
             echo "  --task_offset       number of tasks to skip from the start (default: 0)"
             echo "  --skip_task         task name to exclude from the selected range"
             echo "  --num_gpus          total GPUs (default: 1)"
+            echo "  --gpu_ids           physical GPU IDs, e.g. 2,3 (count must match num_gpus)"
             echo "  --num_per_gpu       inference servers per GPU (default: 1)"
             echo "  --use_length        actions executed before replanning (default: 10; model horizon: 50)"
+            echo "  --action_smoothing  none (default) or ema; arm joints only, grippers unchanged"
+            echo "  --smoothing_alpha   EMA new-target weight in (0,1] (default: 0.35)"
+            echo "  --smoothing_window  positive odd window (default: 5)"
+            echo "  --smoothing_max_delta max target change rad/action, 0 disables (default: 0.05)"
             echo "  --server_ready_timeout seconds to wait for policy servers (default: 1800)"
             echo "  --use_bf16          use bfloat16 inference (default: False)"
             echo "  --use_fp32          use float32 inference (default: True; release reproduction setting)"
@@ -182,6 +202,32 @@ if ! [[ "$progress_interval" =~ ^[0-9]+$ ]] || [ "$progress_interval" -lt 1 ]; t
 fi
 
 # ===== Common environment =====
+if ! [[ "$num_gpus" =~ ^[0-9]+$ ]] || [ "$num_gpus" -lt 1 ]; then
+    echo "Error: --num_gpus must be positive" >&2
+    exit 1
+fi
+if [ -n "$gpu_ids" ]; then
+    if ! [[ "$gpu_ids" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+        echo "Error: --gpu_ids must be comma-separated nonnegative physical indices" >&2
+        exit 1
+    fi
+    IFS=',' read -r -a gpu_devices <<< "$gpu_ids"
+    if [ "${#gpu_devices[@]}" -ne "$num_gpus" ]; then
+        echo "Error: --gpu_ids count must match --num_gpus" >&2
+        exit 1
+    fi
+else
+    mapfile -t gpu_devices < <(seq 0 $((num_gpus - 1)))
+fi
+# Validate filter options before loading expensive model servers.
+python - "$action_smoothing" "$smoothing_alpha" "$smoothing_window" "$smoothing_max_delta" "${gpu_devices[@]}" <<'PY' || exit 1
+import sys
+from deploy.action_smoothing import RoboTwinActionSmoother
+RoboTwinActionSmoother(sys.argv[1], float(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4]))
+ids = [int(value) for value in sys.argv[5:]]
+if len(ids) != len(set(ids)):
+    raise ValueError("--gpu_ids must not contain duplicate devices")
+PY
 # Policy servers are local.  Bypass HTTP(S) proxies explicitly; otherwise some
 # WebSocket versions may send ws://0.0.0.0/localhost handshakes to a configured
 # proxy and report a misleading "invalid HTTP response" while the model loads.
@@ -341,6 +387,8 @@ echo -e "\033[36mTasks this run (${num_tasks}, skipped first ${task_offset}, exc
 echo -e "\033[36mInference config: ${num_gpus} GPU x ${num_per_gpu} servers/GPU = ${num_slots} slots\033[0m"
 echo -e "\033[36mInference precision: use_bf16=${use_bf16}, use_fp32=${use_fp32}, use_compile=${use_compile}\033[0m"
 echo -e "\033[36mControl/video: replan every ${use_length} actions, video_fps=${video_fps}, video=${enable_video}\033[0m"
+echo "Physical GPU IDs: ${gpu_devices[*]}"
+echo "Action smoothing: mode=${action_smoothing}, alpha=${smoothing_alpha}, window=${smoothing_window}, max_delta=${smoothing_max_delta} rad/action (arm only; grippers unchanged)"
 echo -e "\033[36mEvaluation length: ${num_episodes} episode(s) per task\033[0m"
 echo -e "\033[36mConsole progress interval: ${progress_interval}s\033[0m"
 
@@ -377,7 +425,7 @@ echo -e "\033[32m========== Starting inference side: ${num_slots} QwenPi servers
 cd "$inference_workdir" || { echo -e "\033[31mError: inference workdir ${inference_workdir} missing\033[0m"; exit 1; }
 
 for slot in $(seq 0 $((num_slots-1))); do
-    gpu_id=$(( slot % num_gpus ))
+    gpu_id=${gpu_devices[$((slot % num_gpus))]}
     port=$(( start_port + slot ))
 
     export CUDA_VISIBLE_DEVICES=${gpu_id}
@@ -431,7 +479,7 @@ fi
 for slot in $(seq 0 $((num_slots-1))); do
     port=$(( start_port + slot ))
     local_pid=${inference_pids[$slot]}
-    log_file="${run_dir}/inference_logs/qwenpi_slot${slot}_gpu$((slot % num_gpus))_port${port}.log"
+    log_file="${run_dir}/inference_logs/qwenpi_slot${slot}_gpu${gpu_devices[$((slot % num_gpus))]}_port${port}.log"
     deadline=$(( $(date +%s) + server_ready_timeout ))
     echo -e "\033[36m[inf slot $slot] Waiting for http://127.0.0.1:${port}/healthz (timeout ${server_ready_timeout}s)...\033[0m"
     while true; do
@@ -483,7 +531,7 @@ fi
 deploy_pkg_src="${inference_workdir%/}/deploy"
 deploy_pkg_dst="${eval_workdir}/script/deploy"
 mkdir -p "$deploy_pkg_dst"
-for f in __init__.py websocket_client_policy.py msgpack_numpy.py; do
+for f in __init__.py websocket_client_policy.py msgpack_numpy.py action_smoothing.py; do
     if [ ! -f "$deploy_pkg_src/$f" ]; then
         echo -e "\033[31mError: deploy helper source not found: ${deploy_pkg_src}/${f}\033[0m"
         exit 1
@@ -551,7 +599,7 @@ done
 launch_task() {
     local slot=$1
     local task_name=$2
-    local gpu_id=$(( slot % num_gpus ))
+    local gpu_id=${gpu_devices[$((slot % num_gpus))]}
     local port=$(( start_port + slot ))
 
     export CUDA_VISIBLE_DEVICES=${gpu_id}
@@ -590,6 +638,10 @@ launch_task() {
         --port ${port} \
         --robo_name ${robo_name} \
         --video_fps ${video_fps} \
+        --action_smoothing ${action_smoothing} \
+        --smoothing_alpha ${smoothing_alpha} \
+        --smoothing_window ${smoothing_window} \
+        --smoothing_max_delta ${smoothing_max_delta} \
         --eval_video_log ${enable_video} \
         --output_dir '${run_dir}/eval_results'" >> "$log_file" 2>&1 &
 
@@ -675,7 +727,7 @@ report_progress() {
             fi
         fi
 
-        echo "  slot ${slot} / GPU $((slot % num_gpus)): ${task_name} — ${progress_text}, attempt ${attempt}/${max_retries}, elapsed ${elapsed}s"
+        echo "  slot ${slot} / GPU ${gpu_devices[$((slot % num_gpus))]}: ${task_name} — ${progress_text}, attempt ${attempt}/${max_retries}, elapsed ${elapsed}s"
     done
 }
 
@@ -790,6 +842,8 @@ echo -e "\033[36mGenerating stats file: ${stats_file}\033[0m"
     echo "  Inference: ${num_gpus} GPU x ${num_per_gpu}/GPU = ${num_slots} slots"
     echo "  Precision: use_bf16=${use_bf16}, use_fp32=${use_fp32}, use_compile=${use_compile}"
     echo "  Control: use_length=${use_length} (model action horizon=50), chunk_ret=True"
+    echo "  Physical GPU IDs: ${gpu_devices[*]}"
+    echo "  Action smoothing: mode=${action_smoothing}, alpha=${smoothing_alpha}, window=${smoothing_window}, max_delta=${smoothing_max_delta} rad/action; grippers unchanged"
     echo "  Server readiness timeout: ${server_ready_timeout}s"
     echo "  Video: enabled=${enable_video}, fps=${video_fps}, per-action refresh=True"
     echo "  Result: ${completed} done, ${skipped} skipped"

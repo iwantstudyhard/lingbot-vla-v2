@@ -157,6 +157,36 @@ frame repeated for an entire action chunk. Set `--use_length 5` or `1` for a mor
 reactive (but slower) closed loop; use `50` only when intentionally reproducing
 the original open-loop chunk setting.
 
+### Optional action smoothing (diagnostic mitigation, not a training fix)
+
+Defaults remain unchanged: `--action_smoothing none` sends the raw predictions.
+To test smoothing, append:
+
+```bash
+--action_smoothing ema --smoothing_alpha 0.35 --smoothing_window 5 --smoothing_max_delta 0.05
+```
+
+This filters **physical absolute targets of the 12 arm joints only**. Grippers at
+indices 6 and 13 are untouched. The 5-action centered average uses the already
+returned chunk (no extra inference or resampling). EMA persists across chunk
+boundaries and resets to the observed joint targets at each episode start.
+`max_delta` caps each joint's target change in rad/action, **not rad/s**; 0 disables
+the cap. The filter introduces lag and can harm timing or contacts. It cannot
+correct the wrong task/pose or guarantee a higher success rate.
+
+Keep model, precision, `use_length`, scenes and episode count identical for the
+baseline and filtered comparison. Use a new `--output_base` category for each.
+`eval_results/<task>/action_smoothing.jsonl` records episode/scene seed, raw targets,
+windowed targets and commands actually submitted to the simulator when enabled,
+including runs with `--no_video`. `stats.txt` records all filter settings.
+
+To select physical GPUs 2 and 3 reliably, use `--num_gpus 2 --gpu_ids 2,3`; setting
+only `CUDA_VISIBLE_DEVICES` is insufficient because the launcher assigns devices
+per process. The GPU count must match the list; duplicate IDs are rejected.
+
+Run CPU checks: `python tests/test_action_smoothing.py`. These tests establish
+filter mechanics, not real evaluation success.
+
 ### Monitor / stop
 
 ```bash
