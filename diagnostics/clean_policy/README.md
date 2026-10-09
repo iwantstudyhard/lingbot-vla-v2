@@ -138,3 +138,5 @@ python -B -m diagnostics.clean_policy.training_audit \
 **不要直接给旧 run 加 `--resume-run` 并改 lr 就以为学习率重启了**：DCP 会恢复旧 optimizer/scheduler/global_step。
 也不要在诊断结果出来前一次改 LR、loss、增强、采样、控制器；这样无法辨认效果来自哪一个改动。
 本次没有修改任何正式训练超参数，也没有发起续训。
+
+2026-10-09 后续：针对 14 天期限，新增了独立的 [clean 续训入口](../../docs/clean_training/continuation.md)。它从完整 DCP 恢复 optimizer/data 状态，只显式重建并保存 LR 计划；与上面的 HF 权重 warm-start（清空 optimizer）是两种不同方案，不要混用。普通阶段一、第二阶段和诊断入口默认不启用这次续训机制。

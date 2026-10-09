@@ -12,7 +12,7 @@ from lingbotvla.utils.checkpoint_layout import resolve_resume_checkpoint
 import json
 
 
-def prepare_command(args):
+def prepare_command(args, *, announce=True):
     env = environment(args.gpus, args.master_port)
     resume_checkpoint = None
     resume_step = getattr(args, "resume_step", None)
@@ -61,12 +61,15 @@ def prepare_command(args):
                "--train.training_visualization_output_dir", str(output / "visualizations")]
     if resume_checkpoint is not None:
         command += ["--train.load_checkpoint_path", str(resume_checkpoint)]
-        print(f"Pinned split DCP resume checkpoint: {resume_checkpoint}")
+        if announce:
+            print(f"Pinned split DCP resume checkpoint: {resume_checkpoint}")
     if getattr(args, "smoke", False):
         command += ["--train.max_steps", "5", "--train.save_steps", "5"]
-    print(f"Stage1 {'RESUME (same optimizer/scheduler)' if args.resume_run else 'FRESH (official pretrained initialization)'}")
-    print(f"Output: {output}")
-    print(shlex.join(command))
+    if announce:
+        schedule = 'persisted continuation LR plan' if config['train'].get('continuation_start_step') is not None else 'same optimizer/scheduler'
+        print(f"Stage1 {'RESUME (' + schedule + ')' if args.resume_run else 'FRESH (official pretrained initialization)'}")
+        print(f"Output: {output}")
+        print(shlex.join(command))
     return command, env
 
 

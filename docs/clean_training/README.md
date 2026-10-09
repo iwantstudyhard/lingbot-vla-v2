@@ -79,6 +79,8 @@ bash tools/train_clean_stage1.sh \
 
 ## 第二阶段：独立增强微调
 
+阶段一若需在比赛期限内延长训练并显式重启 LR、但仍保留 optimizer，使用独立的 [期限内续训入口](continuation.md)。普通中断恢复不自动改 LR；该续训入口也不加载第二阶段增强。
+
 选经评测表现良好的**新阶段一** HF checkpoint：
 
 ```bash

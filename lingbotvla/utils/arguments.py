@@ -313,6 +313,16 @@ class TrainingArguments:
         default=0.0,
         metadata={"help": "Learning rate for warmup start. Default to 0.0."},
     )
+    continuation_start_step: Optional[int] = field(
+        default=None,
+        metadata={"help": "Optional explicit LR restart origin for a full-state resume; disabled by default."},
+    )
+    continuation_warmup_steps: int = field(
+        default=200,
+        metadata={"help": "Warmup from the actual saved LR for an explicit continuation."},
+    )
+    continuation_peak_lr: float = field(default=1e-5)
+    continuation_min_lr: float = field(default=5e-6)
     weight_decay: float = field(
         default=0,
         metadata={"help": "L2 regularization strength."},
@@ -543,6 +553,10 @@ class TrainingArguments:
             "help": "Maximum completed step checkpoints to retain. 0 disables rolling cleanup."
         },
     )
+    checkpoint_pinned_step: Optional[int] = field(
+        default=None,
+        metadata={"help": "Retain one baseline step within the rolling checkpoint quota."},
+    )
     save_hf_weights: bool = field(
         default=True,
         metadata={"help": "Save the huggingface format weights to the last checkpoint dir."},
@@ -608,6 +622,15 @@ class TrainingArguments:
         self._train_steps = -1
         if self.max_checkpoints_to_keep < 0:
             raise ValueError("max_checkpoints_to_keep must be non-negative.")
+        if self.continuation_start_step is not None:
+            from .continuation_schedule import validate_continuation_plan
+            validate_continuation_plan(self.continuation_start_step, self.max_steps,
+                self.continuation_warmup_steps, self.continuation_peak_lr, self.continuation_min_lr)
+            if not self.enable_resume or not self.load_checkpoint_path:
+                raise ValueError("An explicit LR continuation requires a pinned full-state resume.")
+        if self.checkpoint_pinned_step is not None:
+            if self.checkpoint_pinned_step < 0 or self.max_checkpoints_to_keep in (1, 2):
+                raise ValueError("A pinned baseline requires a non-negative step and at least 3 checkpoint slots (or unlimited).")
         if self.optimizer == "dist_muon":
             if self.data_parallel_mode != "fsdp2":
                 raise ValueError("optimizer='dist_muon' requires data_parallel_mode='fsdp2'.")
