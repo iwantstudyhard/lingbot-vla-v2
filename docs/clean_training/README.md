@@ -55,7 +55,23 @@ bash tools/train_clean_stage1.sh \
 # 核对后去掉 --dry-run
 ```
 
-读取该运行保存的 `lingbotvla_cli.yaml`，恢复模型、optimizer、scheduler、dataloader与代码原有 RNG 状态；自动尝试最新到更早 DCP checkpoint。没有有效 checkpoint 则报错，不悄悄从零开始。运行目录被移动需要显式迁移有效配置中的路径，不建议运行中重构代码。中断至最近保存步之间的训练不可恢复。
+读取该运行保存的 `lingbotvla_cli.yaml`，恢复模型、optimizer、scheduler、dataloader与代码原有 RNG 状态。启动器选择最新检查点并明确锁定它；若最新目录是不完整的中断保存，报错而不悄悄退回更早模型。可以用 `--resume-step N` 显式选择一个完整的检查点。运行目录被移动需要显式迁移有效配置中的路径，不建议运行中重构代码。中断至最近保存步之间的训练不可恢复。
+
+本项目 DCP 的实际目录是 `global_step_N/model/.metadata`、`global_step_N/optimizer/.metadata`，以及 `global_step_N/extra_state/extra_state_rank_*.pt`；**检查点根目录没有 `.metadata` 是正常的**。只有 `hf_ckpt` 是推理权重，不足以恢复训练状态。启动器会检查两份元数据、非空 `.distcp` 分片与每个请求 rank 的 extra_state。结构通过不等于文件内容全部可读，实际分布式加载仍会核验；optimizer 加载失败直接报错，不再静默重新初始化。
+
+例如原运行使用4卡、希望从19500恢复：
+
+```bash
+export TRAIN_RUN="$WORKSPACE/outputs/train_outputs/robotwin_clean_stage1_<run_id>"
+python -m lingbotvla.utils.checkpoint_layout \
+  "$TRAIN_RUN/checkpoints/global_step_19500" --world-size 4
+bash tools/train_clean_stage1.sh \
+  --resume-run "$TRAIN_RUN" --resume-step 19500 \
+  --gpus 0,1,2,3 --master-port 62500 --dry-run
+# 核对无误、并决定继续训练后，再去掉 --dry-run。
+```
+
+这不会重置学习率计划或改 loss，也不会移动/重写检查点。能恢复训练和模型是否值得继续训练是两个问题，应使用固定示教输入的完整采样误差及配对闭环评测来决定，不能仅看训练平均 loss。
 
 上述示例对应默认单卡运行。恢复时的 GPU 数量必须与运行保存的批量参数匹配，修改仓库里的默认 YAML 不会更改该运行的保存配置。
 
@@ -102,7 +118,11 @@ outputs/train_outputs/robotwin_clean_stage1_<时间戳_UUID>/  # stage2 同理
   stage2_run.json                         # 仅第二阶段
   checkpoints/
     best_checkpoint.json
-    global_step_N/{DCP文件,hf_ckpt/}
+    global_step_N/
+      model/{.metadata,*.distcp}
+      optimizer/{.metadata,*.distcp}
+      extra_state/extra_state_rank_*.pt
+      hf_ckpt/
   visualizations/runs/<本次启动id>/
     lingbotvla_cli.yaml
     analysis/
