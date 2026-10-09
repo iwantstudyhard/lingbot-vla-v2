@@ -76,6 +76,44 @@ Ctrl+C 只终止本命令自己的 worker，不重试、不重启，不清理其
 python -B -m diagnostics.clean_policy.report --run /完整路径/时间_UUID
 ```
 
+## 加上部署平滑，再和官方/专家真实值比较（CPU，不重新推理）
+
+上一轮已经保存每个模型、输入、噪声种子的原始动作。下面直接在**同一批预测**上应用部署现有平滑器，
+因此能隔离滤波效果，不重新解码视频、占 GPU、启动模拟器或改训练流程。
+
+```bash
+cd /scratch/lingbot_ws/lingbot-vla-v2
+conda activate lingbotvla
+
+python -B -m diagnostics.clean_policy.smoothing \
+  --run "$PWD/outputs/eval_outputs/clean_policy_diagnostics/20261009_165159_2d89ddc8" \
+  --use-length 20 \
+  --alpha 0.35 \
+  --window 5 \
+  --max-delta 0.05
+```
+
+`--run` 必须指向包含 plan.json、completion.json 和各模型 NPZ 的完整结果目录。
+换新一轮结果只需要改此路径。默认在 `outputs/eval_outputs/clean_policy_smoothing/<时间_UUID>/` 新建结果目录，
+不覆盖之前的预测/图表；可用 `--output /新结果父目录`。第一阶段、第二阶段训练命令与配置均不变。
+
+比较内容是全部保留检查点的 raw/EMA、官方 raw/相同 EMA，及未平滑的 clean 专家真值。
+另有 expert_filter_control：把完美专家动作也过滤，测量滤波器自身的滞后，**不把过滤过的专家当作新真值**。
+只滤12个臂关节，夹爪不变，参数与之前在线 EMA 评测一致：窗口5、alpha0.35、每动作增量限幅0.05 rad。
+
+重要口径：主结果先截取20动作再平滑，与真实部署一致。每个记录输入独立从它的 observation.state 初始化，
+不把不同示教阶段串起来；真实闭环跨chunk的EMA历史不在本离线测试中验证。
+完整50动作的图标注为“假设一次执行50动作”，不能冒充执行20动作后重新规划的真实轨迹。
+请求30但实际29次的旧采样结果保留原样；这次没有顺便修采样器、改精度或更换归一化。
+
+先读 `REPORT.md` 和 `overview_steps10.png`，再看 `actions_*_executed_prefix.png` 的12关节曲线。
+图默认展示最新本方检查点和官方，首个种子；**全部输入/种子/检查点均计分并保存到CSV**。
+可用 `--plot-model step_017500` 指定画哪个本方检查点。
+`summary.csv/json` 保留MAE、差分误差、换种子std、末动作及静止/运动关节误差；
+`paired_changes.csv` 列出每个预测误差是变好还是变差；`filtered_actions/` 保存平滑前后数组。
+读取来源的 SHA256 保存到 `source_manifest.json`，完成时再次核对原始文件未变。
+这是**训练集离线诊断，不是成功率**；官方是训练了更多 clean+random 数据的参考模型。
+
 ## 学习率审阅与后续（先诊断，暂不启动）
 
 18k、global batch32，约 1.049 次起始帧曝光；cosine 的 540 步 warmup 后从1e-5降到1e-6。
