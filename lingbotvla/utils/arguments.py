@@ -939,6 +939,8 @@ def parse_args(rootclass: T) -> T:
     base_to_subclass = {}
     dict_fields = set()
     list_fields = set()
+    nullable_fields = set()
+    argument_actions = {}
     for subclass in fields(rootclass):
         base = subclass.name
         base_to_subclass[base] = subclass.default_factory
@@ -953,6 +955,10 @@ def parse_args(rootclass: T) -> T:
 
             attr_type = type_hints[attr.name]
             origin_type = getattr(attr_type, "__origin__", attr_type)
+            # Saved dataclasses contain actual YAML nulls. Keep them as None,
+            # including legacy fields annotated as str but defaulting to None.
+            if attr.default is None or type(None) in getattr(attr_type, "__args__", ()):
+                nullable_fields.add(f"{base}.{attr.name}")
             if isinstance(attr_type, str):
                 raise RuntimeError(f"Cannot resolve type {attr.type} of {attr.name}.")
 
@@ -1013,7 +1019,7 @@ def parse_args(rootclass: T) -> T:
                 else:
                     parser_kwargs["required"] = True
 
-            parser.add_argument(f"--{base}.{attr.name}", **parser_kwargs)
+            argument_actions[f"{base}.{attr.name}"] = parser.add_argument(f"--{base}.{attr.name}", **parser_kwargs)
 
     cmd_args = list(sys.argv[1:])
     original_args = list(cmd_args)
@@ -1048,8 +1054,21 @@ def parse_args(rootclass: T) -> T:
     for base, arg_dict in input_data.items():
         for arg_name, arg_value in arg_dict.items():
             if f"--{base}.{arg_name}=" not in cmd_args_string:  # lower priority
-                # Skip list fields with None values to use default
-                if f"{base}.{arg_name}" in list_fields and arg_value is None:
+                key = f"{base}.{arg_name}"
+                if arg_value is None:
+                    if key not in nullable_fields:
+                        raise ValueError(f"Argument {key} does not accept YAML/JSON null")
+                    # Do not stringify None as 'null': that breaks numeric
+                    # fields and turns absent paths into literal 'null' paths.
+                    parser.set_defaults(**{key: None})
+                    argument_actions[key].required = False
+                    continue
+                if key in list_fields and isinstance(arg_value, list) and not arg_value:
+                    # nargs='+' requires CLI items, but [] is a legitimate
+                    # saved list. Preserve it directly instead of emitting an
+                    # empty --list option or falling back to a nonempty default.
+                    parser.set_defaults(**{key: []})
+                    argument_actions[key].required = False
                     continue
 
                 cmd_args.append(f"--{base}.{arg_name}")
@@ -1068,7 +1087,7 @@ def parse_args(rootclass: T) -> T:
 
     parse_result = defaultdict(dict)
     for key, value in vars(args).items():
-        if key in dict_fields:
+        if key in dict_fields and value is not None:
             if isinstance(value, str) and value.startswith("{"):
                 value = _convert_str_dict(json.loads(value))
             else:

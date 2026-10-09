@@ -43,6 +43,8 @@ bash tools/train_clean_continue.sh \
 
 启动后应看到 `Restored optimizer state`、成功加载 19500 和 `[continuation_lr]`；第一步实际更新仍用已保存 LR，随后 200 步上升。tqdm 从 19500/48000 开始。不能只看到预检查成功就认为所有训练 tensor 已加载。
 
+完整保存的配置包含 `basic_modules: []` 等空列表和 `null`。参数解析器现在直接保留这些类型，不再将空列表拼成无值的 `--model.basic_modules`，也不将 `null` 转成字符串路径。若看到 `expected at least one argument`，先拉取这个修复；不要往列表填虚假的模块名，也不用删除/改写运行配置、归一化或检查点。
+
 如果希望先预览，加 `--dry-run`，看完去掉即可。不要使用 `--init-hf` 代替完整恢复，也不要删 optimizer 文件。不要另外从旧 19500 重复启动同一个目录。
 
 ## 以后再次中断
