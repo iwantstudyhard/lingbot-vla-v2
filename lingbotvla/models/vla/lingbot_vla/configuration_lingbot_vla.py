@@ -54,6 +54,10 @@ class LingbotVLAConfig(PretrainedConfig):
         vlm_causal: bool = False,
         tokenizer_max_length: int = 48,
         loss_type: str = "fm",
+        motion_frame_weight_alpha: float = 0.0,
+        motion_frame_weight_max: float = 3.0,
+        smooth_velocity_loss_weight: float = 0.0,
+        smooth_acceleration_loss_weight: float = 0.0,
         norm_qkv: bool = False,
         align_params: Optional[Dict[str, Any]] = None,
         use_compile: bool = False,
@@ -124,6 +128,10 @@ class LingbotVLAConfig(PretrainedConfig):
         self.norm_qkv = norm_qkv
         self.use_compile = use_compile
         self.loss_type = loss_type
+        self.motion_frame_weight_alpha = motion_frame_weight_alpha
+        self.motion_frame_weight_max = motion_frame_weight_max
+        self.smooth_velocity_loss_weight = smooth_velocity_loss_weight
+        self.smooth_acceleration_loss_weight = smooth_acceleration_loss_weight
         self.separate_time_proj = separate_time_proj
         self.final_norm_adanorm = final_norm_adanorm
         self.freeze_vision_encoder = freeze_vision_encoder

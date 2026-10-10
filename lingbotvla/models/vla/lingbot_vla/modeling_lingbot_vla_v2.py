@@ -22,7 +22,11 @@ from .modeling_lingbot_vla import (
     replace_lnorm_with_adanorm,
     FlowMatching as FlowMatchingV1,
 )
-from .loss_utils import reduce_action_losses
+from .loss_utils import (
+    compute_action_smoothness_losses,
+    compute_motion_frame_weights,
+    reduce_action_losses,
+)
 from .utils import (
     block_suffix_to_fv_,
     create_sinusoidal_pos_embedding,
@@ -782,6 +786,8 @@ class FlowMatchingV2(FlowMatchingV1):
         future_video_targets=None,
         future_video_cls_targets=None,
         future_video_current_patch=None,
+        joint_mask=None,
+        action_is_pad=None,
     ) -> Tensor:
         dtype = state.dtype
         device = state.device
@@ -916,6 +922,28 @@ class FlowMatchingV2(FlowMatchingV1):
         )
         if align_metrics:
             moe_metrics.update(align_metrics)
+
+        # Recover an estimate of the clean action from the flow-matching
+        # interpolation: x_t = t*noise + (1-t)*action and v_t = noise-action.
+        # Therefore action_hat = x_t - t*v_t. Smoothness is measured on this
+        # clean-action estimate, rather than on the random velocity target.
+        smooth_velocity_loss = losses.new_zeros(())
+        smooth_acceleration_loss = losses.new_zeros(())
+        if (
+            getattr(self.config, "smooth_velocity_loss_weight", 0.0) > 0
+            or getattr(self.config, "smooth_acceleration_loss_weight", 0.0) > 0
+        ):
+            action_hat = x_t - time_expanded * v_t
+            smooth_velocity_loss, smooth_acceleration_loss = compute_action_smoothness_losses(
+                action_hat,
+                actions,
+                joint_mask=joint_mask,
+                action_is_pad=action_is_pad,
+            )
+        # Keep the live tensors private until the policy adds their configured
+        # coefficients to total_loss; public metrics are detached there.
+        moe_metrics["_action_smooth_velocity_loss_raw"] = smooth_velocity_loss
+        moe_metrics["_action_smooth_acceleration_loss_raw"] = smooth_acceleration_loss
         return losses, loss_depth, loss_future_depth, loss_future_video, depth_preds, seq_wise_loss, router_z_loss, moe_metrics, future_depth_preds, future_video_preds, current_video_preds
 
     def sample_actions(
@@ -1286,17 +1314,45 @@ class LingbotVlaV2Policy(PreTrainedModel):
             future_video_targets=future_video_targets,
             future_video_cls_targets=future_video_cls_targets,
             future_video_current_patch=future_video_current_patch,
+            joint_mask=joint_mask,
+            action_is_pad=action_is_pad,
         )
 
+        motion_weights, motion_metrics = compute_motion_frame_weights(
+            actions,
+            joint_mask=joint_mask,
+            action_is_pad=action_is_pad,
+            alpha=float(getattr(self.config, "motion_frame_weight_alpha", 0.0)),
+            max_weight=float(getattr(self.config, "motion_frame_weight_max", 3.0)),
+        )
         loss_vla, batch_mean_losses, action_mask_metrics = reduce_action_losses(
             losses,
             joint_mask=joint_mask,
             action_is_pad=action_is_pad,
             action_dim=self.config.action_dim,
+            element_weights=motion_weights,
+        )
+
+        smooth_velocity_loss = moe_metrics.pop(
+            "_action_smooth_velocity_loss_raw", losses.new_zeros(())
+        )
+        smooth_acceleration_loss = moe_metrics.pop(
+            "_action_smooth_acceleration_loss_raw", losses.new_zeros(())
+        )
+        smooth_velocity_weighted = (
+            smooth_velocity_loss * getattr(self.config, "smooth_velocity_loss_weight", 0.0)
+        )
+        smooth_acceleration_weighted = (
+            smooth_acceleration_loss * getattr(self.config, "smooth_acceleration_loss_weight", 0.0)
         )
 
         loss_dict["batch_mean_losses"] = batch_mean_losses.detach()
         loss_dict.update(action_mask_metrics)
+        loss_dict.update(motion_metrics)
+        loss_dict["action/smooth_velocity_loss"] = smooth_velocity_loss.detach()
+        loss_dict["action/smooth_acceleration_loss"] = smooth_acceleration_loss.detach()
+        loss_dict["action/smooth_velocity_loss_weighted"] = smooth_velocity_weighted.detach()
+        loss_dict["action/smooth_acceleration_loss_weighted"] = smooth_acceleration_weighted.detach()
         total_loss = (
             loss_vla
             + loss_depth
@@ -1304,6 +1360,8 @@ class LingbotVlaV2Policy(PreTrainedModel):
             + loss_future_video
             + seq_wise_loss
             + router_z_loss
+            + smooth_velocity_weighted
+            + smooth_acceleration_weighted
         )
         loss_dict["router_z_loss"] = router_z_loss.detach() if torch.is_tensor(router_z_loss) else router_z_loss
         if moe_metrics:

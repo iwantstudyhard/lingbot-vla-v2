@@ -59,6 +59,14 @@ train:
   use_shared_expert_gate: false
   use_moe_expert_lr: true
   loss_type: L1_fm
+
+  # Stage 2: emphasize valid frames with expert motion while retaining static frames.
+  motion_frame_weight_alpha: 0.5
+  motion_frame_weight_max: 3.0
+
+  # Stage 3: smooth the clean-action estimate reconstructed from Flow Matching.
+  smooth_velocity_loss_weight: 0.05
+  smooth_acceleration_loss_weight: 0.01
   data_parallel_mode: fsdp2
   enable_full_shard: false
   module_fsdp_enable: true

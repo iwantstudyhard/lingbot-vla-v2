@@ -215,6 +215,22 @@ class MyTrainingArguments(TrainingArguments):
         default='fm',
         metadata={"help": "Which loss to use."},
     )
+    motion_frame_weight_alpha: float = field(
+        default=0.0,
+        metadata={"help": "Relative weight added to frames with expert action motion; 0 disables motion weighting."},
+    )
+    motion_frame_weight_max: float = field(
+        default=3.0,
+        metadata={"help": "Maximum motion-frame weight after normalization."},
+    )
+    smooth_velocity_loss_weight: float = field(
+        default=0.0,
+        metadata={"help": "Weight for first-difference action smoothness loss; 0 disables it."},
+    )
+    smooth_acceleration_loss_weight: float = field(
+        default=0.0,
+        metadata={"help": "Weight for second-difference action smoothness loss; 0 disables it."},
+    )
     align_params: Optional[Dict[str, Any]] = field(
         default_factory=dict,
         metadata={"help": "The config of vaco"},
@@ -1097,6 +1113,8 @@ def main(*, arguments_class=None, dataset_builder=None, validate_args=None,
                 helper.print_example(example=micro_batches[0], rank=args.train.local_rank)
 
             total_loss, total_vla_loss, total_depth_loss, total_future_depth_loss, total_future_video_loss, total_seq_wise_loss, total_router_z_loss = 0, 0, 0, 0, 0, 0, 0
+            total_smooth_velocity_loss, total_smooth_acceleration_loss = 0, 0
+            total_motion_weight_mean = 0
             total_action_padding_ratio, total_action_valid_timestep_ratio = 0, 0
             depth_targets, depth_preds = None, None
             future_depth_targets, future_depth_preds = None, None
@@ -1188,6 +1206,9 @@ def main(*, arguments_class=None, dataset_builder=None, validate_args=None,
                     future_video_loss = future_video_loss / len(micro_batches)
                     seq_wise_loss = seq_wise_loss / len(micro_batches)
                     router_z_loss = loss_log.get("router_z_loss", loss_log.get("moe_zloss/weighted", 0))
+                    smooth_velocity_loss = loss_log.get("action/smooth_velocity_loss", 0)
+                    smooth_acceleration_loss = loss_log.get("action/smooth_acceleration_loss", 0)
+                    motion_weight_mean = loss_log.get("action/motion_weight_mean", 1)
                     action_padding_ratio = loss_log.get("action/padding_ratio", 0)
                     action_valid_timestep_ratio = loss_log.get("action/valid_timestep_ratio", 1)
                     avg_lang_length = micro_batch['lang_masks'].sum(dim=-1).float().mean()
@@ -1207,6 +1228,15 @@ def main(*, arguments_class=None, dataset_builder=None, validate_args=None,
                     total_seq_wise_loss += seq_wise_loss.item()
                 if not (isinstance(router_z_loss, int) or isinstance(router_z_loss, float)):
                     total_router_z_loss += router_z_loss.item() / len(micro_batches)
+                if not (isinstance(smooth_velocity_loss, int) or isinstance(smooth_velocity_loss, float)):
+                    total_smooth_velocity_loss += smooth_velocity_loss.item() / len(micro_batches)
+                if not (isinstance(smooth_acceleration_loss, int) or isinstance(smooth_acceleration_loss, float)):
+                    total_smooth_acceleration_loss += smooth_acceleration_loss.item() / len(micro_batches)
+                total_motion_weight_mean += (
+                    motion_weight_mean.item()
+                    if torch.is_tensor(motion_weight_mean)
+                    else float(motion_weight_mean)
+                ) / len(micro_batches)
                 total_action_padding_ratio += (
                     action_padding_ratio.item() if torch.is_tensor(action_padding_ratio) else action_padding_ratio
                 ) / len(micro_batches)
@@ -1268,7 +1298,7 @@ def main(*, arguments_class=None, dataset_builder=None, validate_args=None,
                 grad_norm = grad_norm.full_tensor().item()
 
             # collect mean loss across data parallel group
-            total_loss, total_vla_loss, total_depth_loss, total_future_depth_loss, total_future_video_loss, total_seq_wise_loss, total_router_z_loss, avg_lang_length, grad_norm, total_action_padding_ratio, total_action_valid_timestep_ratio = all_reduce((total_loss, total_vla_loss, total_depth_loss, total_future_depth_loss, total_future_video_loss, total_seq_wise_loss, total_router_z_loss, avg_lang_length, grad_norm, total_action_padding_ratio, total_action_valid_timestep_ratio), group=get_parallel_state().fsdp_group)
+            total_loss, total_vla_loss, total_depth_loss, total_future_depth_loss, total_future_video_loss, total_seq_wise_loss, total_router_z_loss, total_smooth_velocity_loss, total_smooth_acceleration_loss, total_motion_weight_mean, avg_lang_length, grad_norm, total_action_padding_ratio, total_action_valid_timestep_ratio = all_reduce((total_loss, total_vla_loss, total_depth_loss, total_future_depth_loss, total_future_video_loss, total_seq_wise_loss, total_router_z_loss, total_smooth_velocity_loss, total_smooth_acceleration_loss, total_motion_weight_mean, avg_lang_length, grad_norm, total_action_padding_ratio, total_action_valid_timestep_ratio), group=get_parallel_state().fsdp_group)
             total_depth_loss = total_depth_loss / depth_loss_weight
             total_future_depth_loss = total_future_depth_loss / future_depth_loss_weight
             total_future_video_loss = total_future_video_loss / future_video_loss_weight
@@ -1295,6 +1325,9 @@ def main(*, arguments_class=None, dataset_builder=None, validate_args=None,
                 f"Epoch {epoch+1}, "
                 f"Loss {total_loss:.4f}, "
                 f"VLA_Loss {total_vla_loss:.4f}, "
+                f"SmoothVel_Loss {total_smooth_velocity_loss:.4f}, "
+                f"SmoothAcc_Loss {total_smooth_acceleration_loss:.4f}, "
+                f"MotionWeight {total_motion_weight_mean:.3f}, "
                 f"Depth_Loss {total_depth_loss:.4f}, "
                 f"Future_Depth_Loss {total_future_depth_loss:.4f}, "
                 f"FutureVideo_Loss {total_future_video_loss:.4f}, "
@@ -1316,6 +1349,9 @@ def main(*, arguments_class=None, dataset_builder=None, validate_args=None,
             if args.train.global_rank == 0:
                 writer.add_scalar("training/loss", total_loss, global_step)
                 writer.add_scalar("training/vla_loss", total_vla_loss, global_step)
+                writer.add_scalar("training/action_smooth_velocity_loss", total_smooth_velocity_loss, global_step)
+                writer.add_scalar("training/action_smooth_acceleration_loss", total_smooth_acceleration_loss, global_step)
+                writer.add_scalar("training/action_motion_weight_mean", total_motion_weight_mean, global_step)
                 writer.add_scalar("training/depth_loss", total_depth_loss, global_step)
                 writer.add_scalar("training/future_depth_loss", total_future_depth_loss, global_step)
                 writer.add_scalar("training/future_video_loss", total_future_video_loss, global_step)
