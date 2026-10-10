@@ -321,11 +321,15 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         ada_cond: List[torch.FloatTensor] = None,
         visual_pos_masks: Optional[torch.Tensor] = None,
         deepstack_visual_embeds: Optional[list[torch.Tensor]] = None,
+        action_attention_size: int = 0,
     ):
+        if action_attention_size and self.config.attention_implementation != "eager":
+            raise ValueError("Action attention capture requires the eager attention implementation")
         models = [self.qwenvl.model.language_model, self.qwen_expert.model]
         num_layers = self.qwenvl.config.text_config.num_hidden_layers
         action_num_layers = self.config.qwen_expert_config.num_hidden_layers
         router_logits_list = []
+        action_attention_sum = None
 
         assert action_num_layers == num_layers, (
             "Action expert and VLM must have the same number of layers "
@@ -373,6 +377,14 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
                 att_output = flex_attention_with_block_mask(
                     query_states, key_states, value_states, _full_block_mask, query_states.shape[1]
                 )
+            elif action_attention_size:
+                att_output, action_attention = self.attention_interface(
+                    query_states, key_states, value_states, attention_mask,
+                    action_attention_size=action_attention_size,
+                )
+                action_attention_sum = (
+                    action_attention if action_attention_sum is None else action_attention_sum + action_attention
+                )
             else:
                 att_output = self.attention_interface(query_states, key_states, value_states, attention_mask)
 
@@ -412,6 +424,8 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
                 outputs_embeds.append(out_emb)
             else:
                 outputs_embeds.append(models[i].norm(hidden_states))
+        if action_attention_size:
+            return outputs_embeds, past_key_values, router_logits_list, action_attention_sum / num_layers
         return outputs_embeds, past_key_values, router_logits_list
 
     def get_attention_interface(self):
@@ -927,8 +941,13 @@ class FlowMatchingV2(FlowMatchingV1):
         state,
         noise=None,
         image_grid_thw=None,
-    ) -> Tensor:
-        """Do a full Qwen3-VL inference forward and compute the action."""
+        attention_step: Optional[int] = None,
+    ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
+        """Sample a full chunk, optionally returning the selected step's action attention."""
+        if attention_step is not None and not 1 <= attention_step <= self.config.num_steps:
+            raise ValueError(f"attention_step must be in 1..{self.config.num_steps}, got {attention_step}")
+        if attention_step is not None and getattr(self, "_use_compile_predict_velocity", False):
+            raise ValueError("Action attention capture requires non-compiled inference")
         bsize = state.shape[0]
         device = state.device
         dtype = state.dtype
@@ -973,6 +992,7 @@ class FlowMatchingV2(FlowMatchingV1):
         x_t = noise
         time = torch.tensor(1.0, dtype=dtype, device=device)
         count = 0
+        action_attention = None
         predict_velocity_fn = self.predict_velocity
         if getattr(self, "_use_compile_predict_velocity", False):
             predict_velocity_fn = getattr(self, "_compiled_predict_velocity", None)
@@ -988,18 +1008,30 @@ class FlowMatchingV2(FlowMatchingV1):
         while time >= -dt / 2:
             count += 1
             expanded_time = time.expand(bsize)
-            v_t = predict_velocity_fn(
+            capture_attention = count == attention_step
+            attention_kwargs = {"return_action_attention": True} if capture_attention else {}
+            velocity_result = predict_velocity_fn(
                 state,
                 prefix_pad_masks,
                 past_key_values,
                 x_t,
                 expanded_time,
                 prefix_position_ids=prefix_position_ids,
+                **attention_kwargs,
             )
+            if capture_attention:
+                v_t, action_attention = velocity_result
+            else:
+                v_t = velocity_result
 
             x_t += dt * v_t
             time += dt
         print(f"Denoise {count} steps")
+        if attention_step is not None:
+            if action_attention is None:
+                raise RuntimeError("Selected denoising step was not reached for action attention capture")
+            # Upstream stores one step then divides by the total count; this is not a multi-step average.
+            return x_t, action_attention / count
         return x_t
 
     def predict_velocity(
@@ -1010,6 +1042,7 @@ class FlowMatchingV2(FlowMatchingV1):
         x_t,
         timestep,
         prefix_position_ids=None,
+        return_action_attention: bool = False,
     ):
         """Predict velocity at time t using cached Qwen3-VL prefix states."""
         if prefix_position_ids is None:
@@ -1052,7 +1085,8 @@ class FlowMatchingV2(FlowMatchingV1):
         )
         position_ids = full_position_ids[:, :, -suffix_len:]
 
-        outputs_embeds, _, _ = self.qwenvl_with_expert.forward(
+        attention_kwargs = {"action_attention_size": self.config.n_action_steps} if return_action_attention else {}
+        expert_result = self.qwenvl_with_expert.forward(
             attention_mask=full_att_2d_masks,
             position_ids=position_ids,
             past_key_values=past_key_values,
@@ -1060,7 +1094,9 @@ class FlowMatchingV2(FlowMatchingV1):
             use_cache=self.config.use_cache,
             fill_kv_cache=False,
             ada_cond=time_embs if getattr(self.config, "adanorm_time", False) else None,
+            **attention_kwargs,
         )
+        outputs_embeds = expert_result[0]
         suffix_out = outputs_embeds[1]
         suffix_out = suffix_out[:, -self.config.n_action_steps :]
         if getattr(self.config, "action_fp32", False):
@@ -1069,6 +1105,8 @@ class FlowMatchingV2(FlowMatchingV1):
             if suffix_out.dtype != self.action_out_proj.weight.dtype:
                 suffix_out = suffix_out.to(self.action_out_proj.weight.dtype)
             v_t = self.action_out_proj(suffix_out)
+        if return_action_attention:
+            return v_t, expert_result[3]
         return v_t
 
     def _moe_losses_and_metrics(self, router_logits_list, losses):

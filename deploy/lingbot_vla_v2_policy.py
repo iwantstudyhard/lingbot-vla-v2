@@ -29,6 +29,7 @@ from torchvision.transforms.v2 import Resize
 import torch.nn.functional as F
 from lingbotvla.models.vla.lingbot_vla.configuration_lingbot_vla import LingbotVLAV2Config
 from lingbotvla.models.vla.lingbot_vla.modeling_lingbot_vla_v2 import LingbotVlaV2Policy
+from lingbotvla.models.vla.lingbot_vla.autohorizon import AutoHorizonConfig, estimate_horizon
 from lingbotvla.models.vla.lingbot_vla.qwen3vl_in_vla import apply_lingbot_qwen3_vl_patch
 
 from lingbotvla.data.vla_data.utils import FeatureTransform
@@ -103,7 +104,8 @@ class PolicyPreprocessMixin:
         use_compile: bool = False,
         capture_time: bool = False,
         sample_compile_fn: callable = None,
-    ) -> Tensor:
+        attention_step: Optional[int] = None,
+    ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
         """Run one model forward for a batch of already-transformed observations.
 
         Single-sample inference in ``select_action`` builds a leading batch
@@ -111,11 +113,14 @@ class PolicyPreprocessMixin:
         envs we already collate that dimension in the websocket server, so this
         method keeps the tensors batched and returns normalized action chunks
         with shape ``(B, chunk, joint_max_dim)``.
+        With ``attention_step``, also return the FP32 action attention summary.
         """
         self.eval()
         device = "cuda"
         dtype = torch.bfloat16 if use_bf16 else torch.float32
         s1 = time.time()
+        if attention_step is not None and (use_compile or capture_time):
+            raise ValueError("Action attention capture requires non-compiled inference without timing warmups")
 
         images = observation["images"]
         img_masks = observation["img_masks"]
@@ -165,19 +170,24 @@ class PolicyPreprocessMixin:
                 gpu_times = [starts[i].elapsed_time(ends[i]) for i in range(iters)]
                 print(f"sample_actions avg time: {sum(gpu_times)/len(gpu_times):.4f} ms, min time: {min(gpu_times):.4f} ms, max time: {max(gpu_times):.4f} ms")
         else:
-            actions = sample_compile_fn(
+            attention_kwargs = {"attention_step": attention_step} if attention_step is not None else {}
+            sample_result = sample_compile_fn(
                             images.to(dtype=dtype, device=device),
                             img_masks.to(device=device),
                             lang_tokens.to(device=device),
                             lang_masks.to(device=device),
                             state.to(dtype=dtype, device=device),
                             image_grid_thw=self._to_device_image_grid_thw(image_grid_thw, device),
+                            **attention_kwargs,
             )
+            actions = sample_result[0] if attention_step is not None else sample_result
 
         delta_time = time.time() - s1
         print(f"sample_actions batch={actions.shape[0]} cost {delta_time} s")
         if use_bf16:
             observation["state"] = observation["state"].to(dtype=torch.float32)
+        if attention_step is not None:
+            return actions.to(dtype=torch.float32, device="cpu"), sample_result[1]
         return actions.to(dtype=torch.float32, device="cpu")
 
 class LingBotVlaV2InferencePolicy(PolicyPreprocessMixin, LingbotVlaV2Policy):
@@ -199,6 +209,10 @@ class LingbotVLAv2Server:
         use_bf16=True,
         use_fp32=False,
         use_compile=False,
+        horizon_mode="fixed",
+        autohorizon_attention_step=3,
+        autohorizon_hold_thr=0.3,
+        autohorizon_max_entropy_q=0.9,
     ) -> None:
         assert not (use_bf16 and use_fp32), 'Bfloat16 or Float32!!!'
         self.adaptive_ensemble_alpha = adaptive_ensemble_alpha
@@ -210,7 +224,12 @@ class LingbotVLAv2Server:
 
         self.task_description = None
 
-        self.use_compile = use_compile
+        self.horizon_config = AutoHorizonConfig(
+            horizon_mode, autohorizon_attention_step, autohorizon_hold_thr, autohorizon_max_entropy_q,
+        )
+        self.requested_use_compile = bool(use_compile)
+        self.use_compile = bool(use_compile) and not self.horizon_config.enabled
+        print(f"Horizon mode={horizon_mode}, requested_compile={use_compile}, effective_compile={self.use_compile}")
         apply_lingbot_qwen3_vl_patch()
 
         self.vla = self.load_vla(path_to_pi_model)
@@ -225,6 +244,7 @@ class LingbotVLAv2Server:
         self.last_action_chunk = None
         self.last_normalized_action_chunk = None
         self._last_full_diagnostics = None
+        self._last_horizon = None
         self.checkpoint_path = str(workspace_path(path_to_pi_model))
         self.use_bf16 = use_bf16
         self.use_fp32 = use_fp32
@@ -311,6 +331,10 @@ class LingbotVLAv2Server:
         self.model_name = model_name
         
         self.config = config
+        self.horizon_config.validate(
+            chunk_ret=self.chunk_ret, use_length=self.use_length,
+            predicted_horizon=config.n_action_steps, num_steps=config.num_steps,
+        )
         qwen_config = AutoConfig.from_pretrained(base_model_path)
         self.merge_qwen_config(qwen_config)
         config = self.config
@@ -363,6 +387,7 @@ class LingbotVLAv2Server:
         self.last_action_chunk = None
         self.last_normalized_action_chunk = None
         self._last_full_diagnostics = None
+        self._last_horizon = None
 
         robot_config = str(workspace_path(f'configs/robot_configs/{robo_name}.yaml'))
         
@@ -449,6 +474,9 @@ class LingbotVLAv2Server:
     def _infer_batch(self, observations, return_normalized=False, return_diagnostics=False):
         if not isinstance(observations, (list, tuple)) or len(observations) == 0:
             raise ValueError("batch observation must be a non-empty list")
+        if self.horizon_config.enabled and len(observations) != 1:
+            raise ValueError("AutoHorizon observe/auto supports only one observation per request")
+        self._last_horizon = None
         started = time.monotonic()
         applied = [self._prepare_model_input(obs) for obs in observations] # bsize, dict{key }
         batch_observation = {}
@@ -470,15 +498,54 @@ class LingbotVLAv2Server:
                 ).numpy().copy()
             diagnostic_arrays['input_state'] = np.stack([obs['observation.state'] for obs in observations])
         sample_start = time.monotonic()
-        actions = self.vla.sample_actions_batch(
+        attention_kwargs = (
+            {"attention_step": self.horizon_config.attention_step} if self.horizon_config.enabled else {}
+        )
+        sample_result = self.vla.sample_actions_batch(
             batch_observation,
             self.use_bf16,
             self.use_compile,
             capture_time=False,
             sample_compile_fn = self.sample_actions_fn,
+            **attention_kwargs,
         )
+        actions = sample_result[0] if self.horizon_config.enabled else sample_result
         
         sample_ms = (time.monotonic() - sample_start) * 1000
+        horizon_ms = 0.0
+        if self.horizon_config.enabled:
+            horizon_start = time.monotonic()
+            attention = sample_result[1]
+            if tuple(attention.shape) == (1, actions.shape[1], actions.shape[1]):
+                estimated, horizon_diagnostics = estimate_horizon(attention[0], self.horizon_config)
+            else:
+                estimated, horizon_diagnostics = None, {"fallback_reason": "invalid_attention_shape"}
+            fallback_reason = horizon_diagnostics.get("fallback_reason")
+            execution_horizon = (
+                estimated if self.horizon_config.mode == "auto" and estimated is not None else self.use_length
+            )
+            self._last_horizon = {
+                "horizon_mode": self.horizon_config.mode,
+                "estimated_execution_horizon": estimated,
+                "execution_horizon": execution_horizon,
+                "predicted_horizon": actions.shape[1],
+                "horizon_method": (
+                    "autohorizon" if self.horizon_config.mode == "auto" and estimated is not None
+                    else "fixed_fallback" if fallback_reason else "fixed"
+                ),
+                "fallback_reason": fallback_reason,
+                "attention_step": self.horizon_config.attention_step,
+            }
+            if fallback_reason:
+                print(f"AutoHorizon fallback to {self.use_length} actions: {fallback_reason}")
+            if return_diagnostics:
+                diagnostic_arrays['action_attention'] = attention.detach().float().cpu().numpy().copy()
+                for key, value in horizon_diagnostics.items():
+                    if isinstance(value, torch.Tensor):
+                        diagnostic_arrays[f'horizon_{key}'] = value.detach().cpu().numpy().copy()
+                    elif key not in ('method', 'fallback_reason'):
+                        self._last_horizon[key] = value
+            horizon_ms = (time.monotonic() - horizon_start) * 1000
         unapply_start = time.monotonic()
         unnormalized_actions = self._unapply_batched_actions(applied, actions)
         unapply_ms = (time.monotonic() - unapply_start) * 1000
@@ -488,7 +555,9 @@ class LingbotVLAv2Server:
                 diagnostic_arrays[f'full_{key}'] = np.array(value, copy=True)
             return unnormalized_actions, actions, {
                 'arrays': diagnostic_arrays, 'available': True,
-                'timing': {'preprocess_ms': preprocess_ms, 'sample_ms': sample_ms, 'unapply_ms': unapply_ms},
+                'timing': {'preprocess_ms': preprocess_ms, 'sample_ms': sample_ms, 'unapply_ms': unapply_ms,
+                           **({'horizon_ms': horizon_ms} if self.horizon_config.enabled else {})},
+                **(self._last_horizon or {}),
             }
         if return_normalized:
             return unnormalized_actions, actions
@@ -532,13 +601,14 @@ class LingbotVLAv2Server:
             else:
                 unnormalized_actions = self._infer_batch(observations)
                 normalized_actions = None
-            if self.use_length > 0:
+            execution_length = self._last_horizon['execution_horizon'] if self._last_horizon else self.use_length
+            if execution_length > 0:
                 for output_key in unnormalized_actions.keys():
-                    assert self.use_length <= unnormalized_actions[output_key].shape[1]
-                    unnormalized_actions[output_key] = unnormalized_actions[output_key][:, :self.use_length]
+                    assert execution_length <= unnormalized_actions[output_key].shape[1]
+                    unnormalized_actions[output_key] = unnormalized_actions[output_key][:, :execution_length]
                 if normalized_actions is not None:
-                    assert self.use_length <= normalized_actions.shape[1]
-                    normalized_actions = normalized_actions[:, :self.use_length]
+                    assert execution_length <= normalized_actions.shape[1]
+                    normalized_actions = normalized_actions[:, :execution_length]
             
             self.last_action_chunk = unnormalized_actions  # always (B, chunk, dim)
             self.last_normalized_action_chunk = normalized_actions
@@ -563,7 +633,7 @@ class LingbotVLAv2Server:
             if normalized_action is not None:
                 normalized_action = normalized_action[0]
 
-        result = action
+        result = {**action, **self._last_horizon} if self._last_horizon else action
         if return_normalized:
             result = dict(result)
             result["_normalized_actions"] = normalized_action
@@ -609,6 +679,8 @@ class LingbotVLAv2Server:
                     'total_memory': torch.cuda.get_device_properties(0).total_memory,
                     'cuda_version': torch.version.cuda},
             'use_compile': self.use_compile, 'use_length': self.use_length, 'chunk_ret': self.chunk_ret,
+            'requested_use_compile': self.requested_use_compile,
+            'autohorizon': self.horizon_config.metadata(),
             'service_seed': 42, 'seed_policy': 'Seeded once at module import; reset does not reseed',
             'environment': environment_info(),
         })
@@ -677,6 +749,10 @@ def main():
     )
 
     parser.add_argument('--eval_run_dir', type=str, default=None)
+    parser.add_argument('--horizon_mode', choices=('fixed', 'observe', 'auto'), default='fixed')
+    parser.add_argument('--autohorizon_attention_step', type=int, default=3)
+    parser.add_argument('--autohorizon_hold_thr', type=float, default=0.3)
+    parser.add_argument('--autohorizon_max_entropy_q', type=float, default=0.9)
     parser.add_argument('--eval_slot', type=int, default=0)
     args = parser.parse_args()
 
@@ -687,6 +763,10 @@ def main():
         use_bf16=args.use_bf16,
         use_fp32=args.use_fp32,
         use_compile=args.use_compile,
+        horizon_mode=args.horizon_mode,
+        autohorizon_attention_step=args.autohorizon_attention_step,
+        autohorizon_hold_thr=args.autohorizon_hold_thr,
+        autohorizon_max_entropy_q=args.autohorizon_max_entropy_q,
     )
     model_server = WebsocketPolicyServer(model, port=args.port,
                                         eval_run_dir=args.eval_run_dir, eval_slot=args.eval_slot)

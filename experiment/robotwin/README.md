@@ -163,7 +163,11 @@ outputs/eval_outputs/<exp>_<step>k_<task_config>_<timestamp>/
 | `--start_port` | base port for inference servers (default 9330, slot *i* uses base + i) |
 | `--num_episodes` | episodes evaluated per task (default 100; use 1 for a smoke test) |
 | `--progress_interval` | seconds between task/episode progress reports in the launcher terminal (default 30) |
-| `--use_length` | actions executed before observing/replanning (default 10; model predicts a 50-action horizon) |
+| `--use_length` | fixed/observe execution length; auto fallback length (default 10; validated against the checkpoint horizon) |
+| `--horizon_mode` | `fixed` (default), `observe` (estimate only), or `auto` (execute the estimated prefix); observe/auto forces non-compiled chunk inference |
+| `--autohorizon_attention_step` | denoising step sampled for action attention, counted from 1 (default 3) |
+| `--autohorizon_hold_thr` | soft-pointer plateau threshold (default 0.3) |
+| `--autohorizon_max_entropy_q` | entropy quantile (default 0.9) |
 | `--server_ready_timeout` | seconds to wait for every policy server's `/healthz` endpoint before starting simulation (default 1800) |
 | `--robo_name` | robot config name (default `robotwin`) |
 | `--task_config` | RoboTwin setting: `demo_clean` or `demo_randomized` |
@@ -174,9 +178,17 @@ outputs/eval_outputs/<exp>_<step>k_<task_config>_<timestamp>/
 The default executes 10 actions from each 50-action prediction and then replans
 from a fresh observation. The evaluation client still renders one frame per
 executed simulator action, so saved videos show continuous motion instead of one
-frame repeated for an entire action chunk. Set `--use_length 5` or `1` for a more
+frame repeated for an entire action chunk. Set `--use_length 5` or `1` in fixed mode for a more
 reactive (but slower) closed loop; use `50` only when intentionally reproducing
 the original open-loop chunk setting.
+
+For AutoHorizon, start with `--horizon_mode observe` to record estimates while
+keeping the fixed execution length, then use `--horizon_mode auto` to execute
+the estimated prefix. Both modes require non-compiled chunk inference and a
+single observation per request. Auto mode can execute more than `--use_length`;
+that argument becomes the fallback length. The implementation preserves the
+upstream bidirectional algorithm behavior. See [the integration notes](../../docs/autohorizon_integration_plan.md)
+for the locked source version, response fields, diagnostics, and validation limits.
 
 ### Monitor / stop
 

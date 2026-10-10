@@ -227,6 +227,7 @@ def our_eager_attention_forward(
     key_states: torch.Tensor,
     value_states: torch.Tensor,
     attention_mask: torch.Tensor,
+    action_attention_size: int = 0,
 ):
     """
     Performs eager attention, optimized with torch.einsum.
@@ -239,6 +240,7 @@ def our_eager_attention_forward(
 
     Returns:
         Output tensor of shape [batch_size, seq_len, num_attention_heads * head_dim].
+        With action_attention_size, also returns the head-averaged [B, T, T] action probabilities.
     """
     bsize, seq_len, num_att_heads, head_dim = query_states.shape
     num_key_value_heads = key_states.shape[2]
@@ -274,6 +276,10 @@ def our_eager_attention_forward(
     att_output = torch.einsum("bhld->blhd", att_output)  # [B, L, H, D]
     att_output = att_output.reshape(bsize, seq_len, num_att_heads * head_dim)
 
+    if action_attention_size:
+        # Reduce immediately: retaining the slice would keep the full probability tensor alive.
+        action_attention = probs[:, :, -action_attention_size:, -action_attention_size:].float().mean(dim=1)
+        return att_output, action_attention
     return att_output
 
 

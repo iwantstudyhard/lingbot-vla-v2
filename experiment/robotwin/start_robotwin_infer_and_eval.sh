@@ -74,6 +74,10 @@ skip_task=""
 num_gpus=1
 num_per_gpu=1
 use_length=10
+horizon_mode=fixed
+autohorizon_attention_step=3
+autohorizon_hold_thr=0.3
+autohorizon_max_entropy_q=0.9
 server_ready_timeout=1800
 use_bf16=False
 use_fp32=True
@@ -102,6 +106,10 @@ while [[ $# -gt 0 ]]; do
         --num_gpus)          num_gpus="$2";          shift 2 ;;
         --num_per_gpu)       num_per_gpu="$2";       shift 2 ;;
         --use_length)        use_length="$2";        shift 2 ;;
+        --horizon_mode)      horizon_mode="$2"; shift 2 ;;
+        --autohorizon_attention_step) autohorizon_attention_step="$2"; shift 2 ;;
+        --autohorizon_hold_thr) autohorizon_hold_thr="$2"; shift 2 ;;
+        --autohorizon_max_entropy_q) autohorizon_max_entropy_q="$2"; shift 2 ;;
         --server_ready_timeout) server_ready_timeout="$2"; shift 2 ;;
         --use_bf16)          use_bf16="$2";        shift 2 ;;
         --use_fp32)          use_fp32="$2";        shift 2 ;;
@@ -135,6 +143,10 @@ while [[ $# -gt 0 ]]; do
             echo "  --num_gpus          total GPUs (default: 1)"
             echo "  --num_per_gpu       inference servers per GPU (default: 1)"
             echo "  --use_length        actions executed before replanning (default: 10; model horizon: 50)"
+            echo "  --horizon_mode      fixed (default), observe, or auto; observe/auto disables compilation"
+            echo "  --autohorizon_attention_step sampled denoising step, counted from 1 (default: 3)"
+            echo "  --autohorizon_hold_thr pointer plateau threshold (default: 0.3)"
+            echo "  --autohorizon_max_entropy_q entropy quantile (default: 0.9)"
             echo "  --server_ready_timeout seconds to wait for policy servers (default: 1800)"
             echo "  --use_bf16          use bfloat16 inference (default: False)"
             echo "  --use_fp32          use float32 inference (default: True; release reproduction setting)"
@@ -168,11 +180,19 @@ inference_script="${resolved_paths[4]}"
 export QWEN3VL_DIR="${resolved_paths[5]}"
 export QWEN3VL_PATH="$QWEN3VL_DIR"
 
-# The model predicts 50 actions.  Evaluation may consume a shorter prefix, but
-# zero, negative, or longer values are invalid for this chunk-return mode.
-if ! [[ "$use_length" =~ ^[0-9]+$ ]] || [ "$use_length" -lt 1 ] || [ "$use_length" -gt 50 ]; then
-    echo -e "\033[31mError: --use_length must be an integer in 1..50 (got '${use_length}').\033[0m"
+# The service validates the upper bound against the loaded checkpoint's horizon.
+if ! [[ "$use_length" =~ ^[0-9]+$ ]] || [ "$use_length" -lt 1 ]; then
+    echo -e "\033[31mError: --use_length must be a positive integer (got '${use_length}').\033[0m"
     exit 1
+fi
+case "$horizon_mode" in
+    fixed|observe|auto) ;;
+    *) echo "Error: --horizon_mode must be fixed, observe, or auto" >&2; exit 1 ;;
+esac
+requested_use_compile="$use_compile"
+if [ "$horizon_mode" != fixed ]; then
+    echo "AutoHorizon ${horizon_mode}: forcing non-compiled inference (requested use_compile=${use_compile})"
+    use_compile=False
 fi
 if ! [[ "$server_ready_timeout" =~ ^[0-9]+$ ]] || [ "$server_ready_timeout" -lt 1 ]; then
     echo -e "\033[31mError: --server_ready_timeout must be a positive integer (got '${server_ready_timeout}').\033[0m"
@@ -379,7 +399,8 @@ fi
 echo -e "\033[36mTasks this run (${num_tasks}, skipped first ${task_offset}, excluded: ${skip_task:-none}): ${task_queue[*]}\033[0m"
 echo -e "\033[36mInference config: ${num_gpus} GPU x ${num_per_gpu} servers/GPU = ${num_slots} slots\033[0m"
 echo -e "\033[36mInference precision: use_bf16=${use_bf16}, use_fp32=${use_fp32}, use_compile=${use_compile}\033[0m"
-echo -e "\033[36mControl/video: replan every ${use_length} actions, video_fps=${video_fps}, video=${enable_video}\033[0m"
+echo -e "\033[36mControl/video: horizon_mode=${horizon_mode}, fixed/fallback_length=${use_length}, video_fps=${video_fps}, video=${enable_video}\033[0m"
+echo "Horizon: mode=${horizon_mode}, fixed/fallback_length=${use_length}, attention_step=${autohorizon_attention_step}, hold_thr=${autohorizon_hold_thr}, entropy_q=${autohorizon_max_entropy_q}"
 echo -e "\033[36mEvaluation length: ${num_episodes} episode(s) per task\033[0m"
 echo -e "\033[36mConsole progress interval: ${progress_interval}s\033[0m"
 
@@ -405,6 +426,9 @@ stats_file="${run_dir}/stats.txt"
     "qwen3vl_dir=$QWEN3VL_DIR" "num_episodes=$num_episodes" "num_gpus=$num_gpus" "num_per_gpu=$num_per_gpu" \
     "num_slots=$num_slots" "use_length=$use_length" "use_bf16=$use_bf16" "use_fp32=$use_fp32" \
     "use_compile=$use_compile" "task_config=$task_config" "eval_trace=$eval_trace" "robo_name=$robo_name" \
+    "requested_use_compile=$requested_use_compile" "horizon_mode=$horizon_mode" \
+    "autohorizon_attention_step=$autohorizon_attention_step" "autohorizon_hold_thr=$autohorizon_hold_thr" \
+    "autohorizon_max_entropy_q=$autohorizon_max_entropy_q" \
     "video_enabled=$enable_video" "video_fps=$video_fps" "inference_env=$inference_env" "sim_env=$sim_env" \
     "seed=$seed" "start_port=$start_port" "server_ready_timeout=$server_ready_timeout" \
     --tasks "${task_queue[@]}" --raw-args "${raw_args[@]}" || exit 1
@@ -445,13 +469,23 @@ for slot in $(seq 0 $((num_slots-1))); do
     if [ "$eval_trace" = full ] || [ "$inference_module" = deploy.lingbot_vla_v2_policy ]; then
         printf -v inference_trace_args '%q ' --eval_run_dir "$run_dir" --eval_slot "$slot"
     fi
+    horizon_args=""
+    if [ "$inference_module" = deploy.lingbot_vla_v2_policy ]; then
+        printf -v horizon_args '%q ' --horizon_mode "$horizon_mode" \
+            --autohorizon_attention_step "$autohorizon_attention_step" \
+            --autohorizon_hold_thr "$autohorizon_hold_thr" --autohorizon_max_entropy_q "$autohorizon_max_entropy_q"
+    elif [ "$horizon_mode" != fixed ]; then
+        echo "AutoHorizon requires deploy/lingbot_vla_v2_policy.py" >&2
+        exit 1
+    fi
     setsid bash -c "source ${conda_sh} && conda activate ${inference_env} && SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 python -m ${inference_module} \
         --model_path '${model_path}' \
         --use_length '${use_length}' \
         --chunk_ret True \
         --use_bf16 "${use_bf16}" \
         --use_fp32 "${use_fp32}" \
-        --use_compile "${use_compile}" \
+        --use_compile "${requested_use_compile}" \
+        ${horizon_args} \
         ${inference_trace_args} \
         --port '${port}'" > "$log_file" 2>&1 &
 

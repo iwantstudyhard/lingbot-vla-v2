@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import subprocess
 import time
+from numbers import Integral
 from pathlib import Path
+
+import numpy as np
 
 from .eval_diagnostics import EpisodeTrace, InvalidActionError, execute_chunk, joint_metadata
 from .eval_logging import (
@@ -69,6 +72,8 @@ def infer_request(model, observation: dict, trace: EpisodeTrace, run: Path, requ
     )
     started = time.monotonic()
     result = model.infer(observation)
+    if not observation.get("reset"):
+        validate_execution_horizon(result)
     rtt_ms = (time.monotonic() - started) * 1000
     diagnostic = result.get("_eval_trace", {})
     if not observation.get("reset"):
@@ -92,10 +97,27 @@ def infer_request(model, observation: dict, trace: EpisodeTrace, run: Path, requ
         server_timing=result.get("server_timing"),
         diagnostic=diagnostic,
         returned_action=result.get("action"),
+        horizon={key: value for key, value in result.items() if key not in ("action", "server_timing", "_eval_trace")},
     )
     if diagnostic.get("model_metadata"):
         trace.update(model_metadata=diagnostic["model_metadata"])
     return result
+
+
+def validate_execution_horizon(result: dict) -> None:
+    """Reject a declared horizon that could make the client execute a different prefix."""
+    if "execution_horizon" not in result:
+        return
+    horizon = result["execution_horizon"]
+    predicted = result.get("predicted_horizon")
+    actions = np.asarray(result.get("action"))
+    if (
+        isinstance(horizon, bool) or not isinstance(horizon, Integral)
+        or isinstance(predicted, bool) or not isinstance(predicted, Integral)
+        or not 1 <= horizon <= predicted
+        or actions.ndim != 2 or actions.shape[0] != horizon
+    ):
+        raise InvalidActionError(f"Execution horizon {horizon} does not match action shape {actions.shape}")
 
 
 def run_episode(
@@ -151,7 +173,25 @@ def run_episode(
                     "task": env.get_instruction(),
                 }
                 result = infer_request(model, formatted, trace, run, f"{request:06d}")
-                execute_chunk(env, result["action"], trace)
+                executed = execute_chunk(env, result["action"], trace)
+                if "execution_horizon" in result:
+                    horizon_metrics = trace.metrics.setdefault("autohorizon", {
+                        "mode": result["horizon_mode"], "selected_counts": {}, "estimated_counts": {},
+                        "executed_counts": {}, "fallback_count": 0,
+                    })
+                    for field, value in (
+                        ("selected_counts", result["execution_horizon"]),
+                        ("estimated_counts", result["estimated_execution_horizon"]),
+                        ("executed_counts", executed),
+                    ):
+                        if value is not None:
+                            counts = horizon_metrics[field]
+                            key = str(value)
+                            counts[key] = counts.get(key, 0) + 1
+                    horizon_metrics["fallback_count"] += int(result.get("fallback_reason") is not None)
+                    trace.log(trace.inference, "horizon_execution", execution_horizon=result["execution_horizon"],
+                              estimated_execution_horizon=result["estimated_execution_horizon"],
+                              executed_actions=executed, fallback_reason=result.get("fallback_reason"))
                 print(f"infer time {result.get('server_timing')}")
                 request += 1
         reason = "success" if env.eval_success else "step_limit"

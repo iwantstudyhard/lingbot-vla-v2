@@ -399,6 +399,8 @@ class PolicyParityTests(unittest.TestCase):
         policy = self.policy_class.__new__(self.policy_class)
         policy.chunk_ret, policy.use_length = chunk_ret, use_length
         policy.use_bf16, policy.use_compile = False, False
+        policy.horizon_config = SimpleNamespace(enabled=False)
+        policy._last_horizon = None
         policy.global_step = 0
         policy.last_action_chunk = policy.last_normalized_action_chunk = policy._last_full_diagnostics = None
         policy.action_key = ["action"]
@@ -484,6 +486,47 @@ class PolicyParityTests(unittest.TestCase):
 
 
 class IntegrationTests(Fixture):
+    def test_autohorizon_full_and_off_execution(self):
+        try:
+            from test_autohorizon import policy_fixture
+            import torch
+        except ImportError:
+            self.skipTest("torch and einops required for AutoHorizon integration")
+        for mode in ("observe", "auto"):
+            for enabled in (True, False):
+                with self.subTest(mode=mode, full_trace=enabled):
+                    server = self.server()
+                    policy, calls = policy_fixture(mode)
+                    policy.action_key = ["action"]
+                    policy.vla.feature_transform.unapply = lambda item: {
+                        "action": torch.cat([item["actions"], torch.zeros(6, 6)], dim=1),
+                    }
+                    # Keep the lightweight normalization metadata and reset for this fake environment.
+                    policy.evaluation_metadata = server._policy.evaluation_metadata
+                    policy.reset = lambda **kwargs: None
+                    server._policy = policy
+                    task = f"horizon_{mode}_{enabled}"
+                    root = self.evaluate(server, env=Env(success_at=1), enabled=enabled, task=task)
+                    episode = next((root / "episodes").iterdir())
+                    info = read_json(episode / "episode.json")
+                    expected_length = 3 if mode == "observe" else 6
+                    metrics = info["metrics"]["autohorizon"]
+                    self.assertEqual(metrics["selected_counts"], {str(expected_length): 1})
+                    self.assertEqual(metrics["executed_counts"], {"1": 1})
+                    self.assertEqual(metrics["estimated_counts"], {"6": 1})
+                    self.assertEqual(len(calls), 2)  # one prediction in each of the two episodes
+                    predictions = list((episode / "predictions").glob("*.npz"))
+                    if enabled:
+                        with np.load(predictions[0], allow_pickle=False) as arrays:
+                            self.assertEqual(arrays["full_action"].shape, (1, 6, 14))
+                            self.assertEqual(arrays["action_attention"].shape, (1, 6, 6))
+                            self.assertEqual(arrays["returned_action"].shape, (expected_length, 14))
+                        events = read_events(episode / "inference.jsonl")
+                        executed = next(event for event in events if event["event"] == "horizon_execution")
+                        self.assertEqual(executed["executed_actions"], 1)
+                    else:
+                        self.assertEqual(predictions, [])
+
     def server(self, invalid=False, slot=0):
         try:
             from deploy.websocket_policy_server import WebsocketPolicyServer
