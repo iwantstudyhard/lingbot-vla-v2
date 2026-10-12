@@ -47,6 +47,7 @@ from lingbotvla.utils.checkpoint_retention import (
 )
 from lingbotvla.utils.training_metrics import AsyncTrainingMetricsWriter, build_visualization_run_dir
 from lingbotvla.utils.normalization_contract import freeze_normalization
+from lingbotvla.utils.continuation_schedule import build_continuation_scheduler
 from lingbotvla.utils.arguments import EvalArguments, DataArguments, ModelArguments, TrainingArguments, parse_args, save_args
 from lingbotvla.utils.dist_utils import all_reduce
 from lingbotvla.models.config_registry import get_config_registry
@@ -943,6 +944,9 @@ def main(*, arguments_class=None, dataset_builder=None, validate_args=None,
             try:
                 protected_paths = list(hf_saver.active_checkpoint_paths())
                 preferred_paths = []
+                if args.train.checkpoint_pinned_step is not None:
+                    preferred_paths.append(Path(args.train.save_checkpoint_path) /
+                        f"global_step_{args.train.checkpoint_pinned_step}")
                 if args.train.keep_best_checkpoint:
                     best_path = best_checkpoint_path(args.train.save_checkpoint_path)
                     if best_path is not None:
@@ -1026,6 +1030,18 @@ def main(*, arguments_class=None, dataset_builder=None, validate_args=None,
         if args.data.require_normalization_contract and (args.train.enable_resume or args.train.load_checkpoint_path):
             raise RuntimeError("Audited resume requested but no checkpoints were found")
         logger.info_rank0("Starting training from scratch.")
+
+    if args.train.continuation_start_step is not None:
+        lr_scheduler = build_continuation_scheduler(
+            optimizer, lr_scheduler, global_step=global_step,
+            start_step=args.train.continuation_start_step, end_step=total_train_steps,
+            warmup_steps=args.train.continuation_warmup_steps,
+            peak_lr=args.train.continuation_peak_lr, min_lr=args.train.continuation_min_lr,
+            original_base_lr=args.train.lr)
+        logger.info_rank0(
+            f"[continuation_lr] Restored optimizer buffers unchanged; "
+            f"global_step={global_step}, plan={json.dumps(lr_scheduler.clean_continuation_plan)}, "
+            f"current_group_lrs={lr_scheduler.get_last_lr()}")
 
     # A resumed run starts a fresh best-checkpoint averaging window immediately
     # after the restored checkpoint. The historical best record remains on disk.

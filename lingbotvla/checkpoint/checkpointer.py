@@ -434,15 +434,15 @@ class DistributedCheckpointer(CheckpointerBase):
             )
 
             optimizer_dir = os.path.join(checkpoint_dir, _OPTIMIZER_DIR)
-            try:
-                dcp.load(
-                    state_dict={"state": OptimizerState(model=state["model"], optimizer=state["optimizer"])}, # 1043
-                    storage_reader=FileSystemReader(optimizer_dir), # 1027
-                    planner = DefaultLoadPlanner(allow_partial_load=True),
-                    process_group=process_group,
-                )
-            except:
-                logger.info_rank0(f"Skip loading Optimizer from {checkpoint_dir}")
+            # Exact resume must restore optimizer state, not silently continue
+            # with a fresh optimizer after a missing/corrupt/incompatible save.
+            dcp.load(
+                state_dict={"state": OptimizerState(model=state["model"], optimizer=state["optimizer"])},
+                storage_reader=FileSystemReader(optimizer_dir),
+                planner=DefaultLoadPlanner(allow_partial_load=allow_partial_load),
+                process_group=process_group,
+            )
+            logger.info_rank0(f"Restored optimizer state from {optimizer_dir}")
         else:
             model_dir = os.path.join(checkpoint_dir, _MODEL_DIR)
             dcp.load(

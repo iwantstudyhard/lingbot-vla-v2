@@ -138,6 +138,18 @@ BF16 状态转为 FP32 数组保存，但保留 BF16 量化后的数值，实际
 下发动作的形状或有限性检查失败时，已保存的 NPZ 保留原始证据，并终止 attempt。
 有限值超出统计范围或限位只作诊断记录，不新增控制裁剪。
 
+动作平滑与完整诊断可同时开启：在批量启动命令中追加
+`--eval_trace full --action_smoothing ema --smoothing_alpha 0.35 --smoothing_window 5 --smoothing_max_delta 0.05`。
+默认 `--action_smoothing none`，按原始预测执行。开启时只平滑 12 个臂关节，夹爪命令保持原值；
+滤波状态在每个回合首次观测时初始化，在同一回合的动作 chunk 之间延续。
+
+服务端预测 NPZ 和 `inference.jsonl` 保留模型原始输出。
+动作事件中的 `raw_action` 是原始预测，`windowed_action` 是窗口平滑结果，
+`executed_action` 和兼容字段 `action` 是实际下发的动作；执行前后反馈仍与实际下发动作关联。
+滤波开启时，任务目录的 `action_smoothing.jsonl` 另存回合初始化、实际执行的动作及滤波参数，
+带 `attempt / episode_id / seed / request_id` 关联键；即使使用 `--no_video` 或 `--eval_trace off` 也保留。
+`run_manifest.json`、`task_config.jsonl`、`episode.json` 和 `stats.txt` 记录滤波设置。
+
 - `control_target`：通过 `get_*_arm_jointState()` 读取的 drive target，包含夹爪命令。
 - `actual_arm_qpos`：通过 `get_*_arm_real_jointState()` 读取，只取真实臂关节的 12 维。
 - `gripper_command`：夹爪命令值；现有 getter 不能作为物理手指位置测量。

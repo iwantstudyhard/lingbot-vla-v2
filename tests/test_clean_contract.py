@@ -289,10 +289,12 @@ class CleanContractTests(unittest.TestCase):
             for component in ("model", "optimizer"):
                 directory = checkpoint / component
                 directory.mkdir(parents=True)
-                (directory / ".metadata").touch()
+                (directory / ".metadata").write_bytes(b"structural test fixture")
+                (directory / "__0_0.distcp").write_bytes(b"structural test fixture")
             extra_state = checkpoint / "extra_state"
             extra_state.mkdir()
-            (extra_state / "extra_state_rank_0.pt").touch()
+            for rank in range(4):
+                (extra_state / f"extra_state_rank_{rank}.pt").write_bytes(b"structural test fixture")
             args = SimpleNamespace(gpus="0,1,2,3", master_port=62500, resume_run=str(run),
                                    init_hf=None, output_dir=None)
 

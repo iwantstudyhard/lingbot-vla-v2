@@ -185,6 +185,16 @@ class Fixture(unittest.TestCase):
 
 
 class LoggingTests(Fixture):
+    def test_summary_preserves_gpu_and_smoothing_settings(self):
+        atomic_json(self.run / "run_manifest.json", {
+            "tasks": [], "gpu_ids": "2 3", "action_smoothing": "ema",
+            "smoothing_alpha": .35, "smoothing_window": 5, "smoothing_max_delta": .05,
+        })
+        summarize_run(self.run)
+        summary = (self.run / "stats.txt").read_text(encoding="utf-8")
+        self.assertIn("Physical GPU IDs: 2 3", summary)
+        self.assertIn("mode=ema, alpha=0.35, window=5, max_delta=0.05", summary)
+
     def test_progress_restores_rate_and_lifecycle_state(self):
         self.assertEqual(format_progress(self.run, "lift_pot", 1), "episodes 0/2, success 0, rate N/A (initializing)")
         trace = self.trace(enabled=False)
@@ -493,7 +503,7 @@ class IntegrationTests(Fixture):
             raise
         return WebsocketPolicyServer(FakePolicy(self.run, invalid), eval_run_dir=str(self.run), eval_slot=slot)
 
-    def evaluate(self, server, env=None, enabled=True, attempt=1, task="lift_pot"):
+    def evaluate(self, server, env=None, enabled=True, attempt=1, task="lift_pot", **smoothing_options):
         root = self.run / "eval_results" / task
         root.mkdir(parents=True, exist_ok=True)
 
@@ -523,8 +533,55 @@ class IntegrationTests(Fixture):
             "eval_trace": "full" if enabled else "off",
             "launcher_owned": True,
         }
+        usr.update(smoothing_options)
         evaluate_task(env or Env(), args, Client(), usr, lambda info: "lift the pot", RuntimeError)
         return root
+
+    def test_full_trace_preserves_predictions_and_records_smoothed_execution(self):
+        server = self.server()
+        root = self.evaluate(
+            server, env=Env(step_limit=6), action_smoothing="ema",
+            smoothing_alpha=0.5, smoothing_window=1, smoothing_max_delta=0,
+        )
+        rows = read_events(root / "action_smoothing.jsonl")
+        starts = [row for row in rows if row["event"] == "episode_start"]
+        self.assertEqual([row["episode"] for row in starts], [0, 1])
+        for episode in (0, 1):
+            actions = [row for row in rows if row["event"] == "action" and row["episode"] == episode]
+            self.assertEqual([row["action_index"] for row in actions], list(range(6)))
+            self.assertEqual([row["request_id"] for row in actions], ["000000"] * 4 + ["000001"] * 2)
+            np.testing.assert_allclose([row["executed_action"][0] for row in actions],
+                                       [.1, .15, .175, .1875, .19375, .196875])
+            np.testing.assert_allclose([row["raw_action"] for row in actions], .2)
+            np.testing.assert_allclose([row["executed_action"][6] for row in actions], .2)
+        for episode_dir in sorted((root / "episodes").iterdir()):
+            metadata = read_json(episode_dir / "episode.json")
+            self.assertEqual(metadata["action_smoothing"]["mode"], "ema")
+            execution = [row for row in read_events(episode_dir / "execution.jsonl")
+                         if row["event"] == "action_end"]
+            self.assertEqual(len(execution), 6)
+            np.testing.assert_allclose(execution[0]["raw_action"], .2)
+            np.testing.assert_allclose(execution[0]["windowed_action"], .2)
+            np.testing.assert_allclose(execution[0]["executed_action"][0], .1)
+            np.testing.assert_array_equal(execution[0]["action"], execution[0]["executed_action"])
+            for prediction in (episode_dir / "predictions").glob("*.npz"):
+                with np.load(prediction, allow_pickle=False) as arrays:
+                    np.testing.assert_allclose(arrays["returned_action"], .2)
+        self.assertEqual(server._policy.calls, 4)
+
+    def test_smoothing_retry_records_remain_isolated_and_append_only(self):
+        server = self.server()
+        root = self.evaluate(server, action_smoothing="ema")
+        original = (root / "action_smoothing.jsonl").read_bytes()
+        self.evaluate(server, attempt=2, action_smoothing="ema")
+        self.assertTrue((root / "action_smoothing.jsonl").read_bytes().startswith(original))
+        rows = read_events(root / "action_smoothing.jsonl")
+        for attempt in (1, 2):
+            starts = [row for row in rows if row["event"] == "episode_start" and row["attempt"] == attempt]
+            self.assertEqual([row["episode_id"] for row in starts], [0, 1])
+            actions = [row for row in rows if row["event"] == "action" and row["attempt"] == attempt]
+            self.assertEqual([row["action_index"] for row in actions], [0, 1, 2] * 2)
+            self.assertEqual([row["seed"] for row in actions], [100001] * 3 + [100002] * 3)
 
     def test_end_to_end_seed_filter_and_report_recovery(self):
         from tools.analyze_eval_logs import generate_report

@@ -8,11 +8,16 @@ import subprocess
 
 from tools.clean_training_common import REPO_ROOT, environment, load_config, preflight, resolve_path, validate_hf
 from lingbotvla.utils.normalization_contract import resolve_inference_normalization, semantic_hash
+from lingbotvla.utils.checkpoint_layout import resolve_resume_checkpoint
 import json
 
 
-def prepare_command(args):
+def prepare_command(args, *, announce=True):
     env = environment(args.gpus, args.master_port)
+    resume_checkpoint = None
+    resume_step = getattr(args, "resume_step", None)
+    if resume_step is not None and not args.resume_run:
+        raise ValueError("--resume-step requires --resume-run")
     if args.resume_run and getattr(args, "smoke", False):
         raise ValueError("Smoke overrides are for a NEW run, not resume")
     if args.resume_run:
@@ -26,11 +31,11 @@ def prepare_command(args):
         if Path(config["train"]["output_dir"]).resolve() != output:
             raise ValueError("Moved runs require deliberate path migration before resume")
         checkpoints = output / "checkpoints"
-        if not any(path.is_file() for path in checkpoints.glob("global_step_*/model/.metadata")):
-            raise ValueError(
-                f"No distributed checkpoint available for resume: expected "
-                f"{checkpoints}/global_step_*/model/.metadata"
-            )
+        configured_checkpoint = config["train"].get("load_checkpoint_path")
+        if configured_checkpoint and resume_step is None:
+            raise ValueError("Saved config pins load_checkpoint_path; choose --resume-step explicitly")
+        resume_checkpoint = resolve_resume_checkpoint(
+            checkpoints, len(env["CUDA_VISIBLE_DEVICES"].split(",")), resume_step)
         # Structural placeholder is sufficient; no weights are read here.
         resolve_inference_normalization(checkpoints / "global_step_0/hf_ckpt", config)
         configured = json.loads(Path(config["data"]["norm_stats_file"]).read_bytes())
@@ -54,11 +59,17 @@ def prepare_command(args):
                "--model.model_path", str(weights), "--train.output_dir", str(output),
                "--train.enable_resume", "true" if args.resume_run else "false",
                "--train.training_visualization_output_dir", str(output / "visualizations")]
+    if resume_checkpoint is not None:
+        command += ["--train.load_checkpoint_path", str(resume_checkpoint)]
+        if announce:
+            print(f"Pinned split DCP resume checkpoint: {resume_checkpoint}")
     if getattr(args, "smoke", False):
         command += ["--train.max_steps", "5", "--train.save_steps", "5"]
-    print(f"Stage1 {'RESUME (same optimizer/scheduler)' if args.resume_run else 'FRESH (official pretrained initialization)'}")
-    print(f"Output: {output}")
-    print(shlex.join(command))
+    if announce:
+        schedule = 'persisted continuation LR plan' if config['train'].get('continuation_start_step') is not None else 'same optimizer/scheduler'
+        print(f"Stage1 {'RESUME (' + schedule + ')' if args.resume_run else 'FRESH (official pretrained initialization)'}")
+        print(f"Output: {output}")
+        print(shlex.join(command))
     return command, env
 
 
@@ -67,6 +78,7 @@ def main():
     parser.add_argument("--init-hf", help="Optional relocated OFFICIAL pretrained initialization")
     parser.add_argument("--output-dir")
     parser.add_argument("--resume-run", help="Only a new audited stage1 run, never the historical mixed-stat run")
+    parser.add_argument("--resume-step", type=int, help="Pin an exact distributed checkpoint step; requires --resume-run")
     parser.add_argument("--gpus", default="0", help="Comma-separated GPU IDs; manually match batch settings in YAML (default: 0)")
     parser.add_argument("--master-port", type=int, default=62500)
     parser.add_argument("--dry-run", action="store_true")

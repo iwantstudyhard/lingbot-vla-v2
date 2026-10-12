@@ -6,6 +6,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from .action_smoothing import RoboTwinActionSmoother
 from .eval_diagnostics import EpisodeTrace, InvalidActionError, execute_chunk, joint_metadata
 from .eval_logging import (
     EventWriter,
@@ -120,6 +121,13 @@ def run_episode(
         trace.stage = "instruction"
         instruction = instruction_factory(episode_info)
         env.set_instruction(instruction=instruction)
+        trace.stage = "smoothing_setup"
+        smoother = RoboTwinActionSmoother(
+            mode=usr_args.get("action_smoothing", "none"),
+            alpha=float(usr_args.get("smoothing_alpha", 0.35)),
+            window=int(usr_args.get("smoothing_window", 5)),
+            max_delta=float(usr_args.get("smoothing_max_delta", 0.05)),
+        )
         trace.update(
             instruction=instruction,
             initialization=getattr(env, "info", episode_info),
@@ -127,7 +135,11 @@ def run_episode(
             step_limit=env.step_lim,
             robot=joint_metadata(env),
             eval_trace="full" if trace.enabled else "off",
+            action_smoothing=smoother.config(),
         )
+        print(f"Action smoothing: {smoother.config()}", flush=True)
+        if smoother.enabled:
+            trace.log_smoothing("episode_start", config=smoother.config())
         trace.stage = "video_start"
         video = start_video(env, trace.directory, video_size, video_fps)
         video_started = video is not None
@@ -143,6 +155,8 @@ def run_episode(
             while env.take_action_cnt < env.step_lim and not env.eval_success:
                 trace.stage = "observation"
                 observation = env.get_obs()
+                if request == 0:
+                    smoother.reset(observation["joint_action"]["vector"])
                 formatted = {
                     "observation.images.cam_high": observation["observation"]["head_camera"]["rgb"],
                     "observation.images.cam_left_wrist": observation["observation"]["left_camera"]["rgb"],
@@ -151,7 +165,7 @@ def run_episode(
                     "task": env.get_instruction(),
                 }
                 result = infer_request(model, formatted, trace, run, f"{request:06d}")
-                execute_chunk(env, result["action"], trace)
+                execute_chunk(env, result["action"], trace, smoother=smoother)
                 print(f"infer time {result.get('server_timing')}")
                 request += 1
         reason = "success" if env.eval_success else "step_limit"

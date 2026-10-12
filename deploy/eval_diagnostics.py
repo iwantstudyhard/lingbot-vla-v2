@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .action_smoothing import RoboTwinActionSmoother
 from .eval_logging import EventWriter, atomic_json, episode_directory_name, exception_fields, record
 
 
@@ -49,6 +50,7 @@ class EpisodeTrace:
         self.results = EventWriter(task_dir / "episode_results.jsonl", context)
         self.inference = EventWriter(self.directory / "inference.jsonl", context)
         self.execution = EventWriter(self.directory / "execution.jsonl", context)
+        self.smoothing = EventWriter(task_dir / "action_smoothing.jsonl", context)
         self.started = time.monotonic()
         self.info = record(context, status="running", reason=None, executed_actions=0)
         self.stage = "setup"
@@ -77,6 +79,18 @@ class EpisodeTrace:
             start = time.monotonic()
             writer.write(event, request_id=self.request_id, **fields)
             self.logging_ms += (time.monotonic() - start) * 1000
+
+    def log_smoothing(self, event: str, **fields) -> None:
+        """Keep filter evidence even when full inference tracing is disabled."""
+        start = time.monotonic()
+        self.smoothing.write(
+            event,
+            request_id=self.request_id,
+            episode=self.context["episode_id"],
+            scene_seed=self.context["seed"],
+            **fields,
+        )
+        self.logging_ms += (time.monotonic() - start) * 1000
 
     def finish(self, reason: str, env, exc: BaseException | None = None) -> None:
         if self.finished:
@@ -145,7 +159,7 @@ class EpisodeTrace:
         return observed
 
 
-def execute_chunk(env, actions, trace: EpisodeTrace) -> int:
+def execute_chunk(env, actions, trace: EpisodeTrace, *, smoother: RoboTwinActionSmoother | None = None) -> int:
     """Validate and execute only the prefix actually accepted by take_action()."""
     trace.stage = "validate_action"
     actions = np.asarray(actions)
@@ -161,10 +175,21 @@ def execute_chunk(env, actions, trace: EpisodeTrace) -> int:
             f"Invalid action shape/values: {actions.shape}, expected (*, {expected_dim}) finite values"
         )
     chunk = actions[None] if actions.ndim == 1 else actions
+    smoothing_enabled = smoother is not None and smoother.enabled
+    try:
+        windowed_chunk = smoother.prepare_chunk(chunk) if smoothing_enabled else chunk
+    except ValueError as exc:
+        raise InvalidActionError(str(exc)) from exc
     executed = 0
-    for index, action in enumerate(chunk):
+    for index, windowed_action in enumerate(windowed_chunk):
         if env.eval_success or env.take_action_cnt >= env.step_lim:
             break
+        action = smoother.filter_action(windowed_action) if smoothing_enabled else windowed_action
+        action_fields = {
+            "raw_action": chunk[index],
+            "windowed_action": windowed_action,
+            "executed_action": action,
+        }
         # Keep the original frame refresh cadence; feedback never calls get_obs().
         if index > 0 and env.eval_video_path is not None:
             env.get_obs()
@@ -179,6 +204,7 @@ def execute_chunk(env, actions, trace: EpisodeTrace) -> int:
             take_action_cnt=before_count,
             action=action,
             before=before,
+            **action_fields,
         )
         start = time.monotonic()
         try:
@@ -194,6 +220,7 @@ def execute_chunk(env, actions, trace: EpisodeTrace) -> int:
                 "action_error",
                 chunk_index=index,
                 action=action,
+                **action_fields,
                 take_action_cnt=env.take_action_cnt,
                 before=before,
                 planning=trace.plans,
@@ -209,11 +236,14 @@ def execute_chunk(env, actions, trace: EpisodeTrace) -> int:
         if count_delta > 0:
             executed += count_delta
             trace.info["executed_actions"] += count_delta
+            if smoothing_enabled:
+                trace.log_smoothing("action", action_index=before_count, chunk_index=index, **action_fields)
         trace.log(
             trace.execution,
             "action_end",
             chunk_index=index,
             action=action,
+            **action_fields,
             before=before,
             after=after,
             take_action_cnt=env.take_action_cnt,

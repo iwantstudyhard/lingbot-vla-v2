@@ -339,6 +339,16 @@ def summarize_run(run: Path, state: str | None = None, write: bool = True) -> di
     lines = [
         f"Run: {run.name}",
         f"State: {result['state']}",
+    ]
+    if "gpu_ids" in manifest:
+        lines.append(f"Physical GPU IDs: {manifest['gpu_ids']}")
+    if "action_smoothing" in manifest:
+        lines.append(
+            f"Action smoothing: mode={manifest['action_smoothing']}, "
+            f"alpha={manifest.get('smoothing_alpha')}, window={manifest.get('smoothing_window')}, "
+            f"max_delta={manifest.get('smoothing_max_delta')} rad/action; grippers unchanged"
+        )
+    lines += [
         f"Complete task coverage: {len(complete_rows)}/{len(names)}",
         "Task | Status | Attempt | Success/Episodes",
     ]

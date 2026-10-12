@@ -1,0 +1,12 @@
+# WebSocket evaluator defaults, maintained in the LingBot repository.
+# ACT is a legacy result label here; this client does not load an ACT model.
+# Task/camera/embodiment settings still come from RoboTwin CONFIGS_PATH.
+policy_name: ACT
+robo_name: robotwin
+task_config: demo_clean
+seed: 0
+num_episodes: 100
+port: 9330
+video_fps: 10
+eval_video_log: true
+action_smoothing: none

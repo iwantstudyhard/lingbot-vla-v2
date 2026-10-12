@@ -313,6 +313,16 @@ class TrainingArguments:
         default=0.0,
         metadata={"help": "Learning rate for warmup start. Default to 0.0."},
     )
+    continuation_start_step: Optional[int] = field(
+        default=None,
+        metadata={"help": "Optional explicit LR restart origin for a full-state resume; disabled by default."},
+    )
+    continuation_warmup_steps: int = field(
+        default=200,
+        metadata={"help": "Warmup from the actual saved LR for an explicit continuation."},
+    )
+    continuation_peak_lr: float = field(default=1e-5)
+    continuation_min_lr: float = field(default=5e-6)
     weight_decay: float = field(
         default=0,
         metadata={"help": "L2 regularization strength."},
@@ -543,6 +553,10 @@ class TrainingArguments:
             "help": "Maximum completed step checkpoints to retain. 0 disables rolling cleanup."
         },
     )
+    checkpoint_pinned_step: Optional[int] = field(
+        default=None,
+        metadata={"help": "Retain one baseline step within the rolling checkpoint quota."},
+    )
     save_hf_weights: bool = field(
         default=True,
         metadata={"help": "Save the huggingface format weights to the last checkpoint dir."},
@@ -608,6 +622,15 @@ class TrainingArguments:
         self._train_steps = -1
         if self.max_checkpoints_to_keep < 0:
             raise ValueError("max_checkpoints_to_keep must be non-negative.")
+        if self.continuation_start_step is not None:
+            from .continuation_schedule import validate_continuation_plan
+            validate_continuation_plan(self.continuation_start_step, self.max_steps,
+                self.continuation_warmup_steps, self.continuation_peak_lr, self.continuation_min_lr)
+            if not self.enable_resume or not self.load_checkpoint_path:
+                raise ValueError("An explicit LR continuation requires a pinned full-state resume.")
+        if self.checkpoint_pinned_step is not None:
+            if self.checkpoint_pinned_step < 0 or self.max_checkpoints_to_keep in (1, 2):
+                raise ValueError("A pinned baseline requires a non-negative step and at least 3 checkpoint slots (or unlimited).")
         if self.optimizer == "dist_muon":
             if self.data_parallel_mode != "fsdp2":
                 raise ValueError("optimizer='dist_muon' requires data_parallel_mode='fsdp2'.")
@@ -916,6 +939,8 @@ def parse_args(rootclass: T) -> T:
     base_to_subclass = {}
     dict_fields = set()
     list_fields = set()
+    nullable_fields = set()
+    argument_actions = {}
     for subclass in fields(rootclass):
         base = subclass.name
         base_to_subclass[base] = subclass.default_factory
@@ -930,6 +955,10 @@ def parse_args(rootclass: T) -> T:
 
             attr_type = type_hints[attr.name]
             origin_type = getattr(attr_type, "__origin__", attr_type)
+            # Saved dataclasses contain actual YAML nulls. Keep them as None,
+            # including legacy fields annotated as str but defaulting to None.
+            if attr.default is None or type(None) in getattr(attr_type, "__args__", ()):
+                nullable_fields.add(f"{base}.{attr.name}")
             if isinstance(attr_type, str):
                 raise RuntimeError(f"Cannot resolve type {attr.type} of {attr.name}.")
 
@@ -990,7 +1019,7 @@ def parse_args(rootclass: T) -> T:
                 else:
                     parser_kwargs["required"] = True
 
-            parser.add_argument(f"--{base}.{attr.name}", **parser_kwargs)
+            argument_actions[f"{base}.{attr.name}"] = parser.add_argument(f"--{base}.{attr.name}", **parser_kwargs)
 
     cmd_args = list(sys.argv[1:])
     original_args = list(cmd_args)
@@ -1025,18 +1054,22 @@ def parse_args(rootclass: T) -> T:
     for base, arg_dict in input_data.items():
         for arg_name, arg_value in arg_dict.items():
             if f"--{base}.{arg_name}=" not in cmd_args_string:  # lower priority
-                # Skip list fields with None values to use default
-                if f"{base}.{arg_name}" in list_fields and arg_value is None:
-                    continue
-                # Preserve optional nulls instead of passing the literal string "null".
+                key = f"{base}.{arg_name}"
                 if arg_value is None:
-                    parser.set_defaults(**{f"{base}.{arg_name}": None})
+                    if key not in nullable_fields:
+                        raise ValueError(f"Argument {key} does not accept YAML/JSON null")
+                    # Do not stringify None as 'null': that breaks numeric
+                    # fields and turns absent paths into literal 'null' paths.
+                    parser.set_defaults(**{key: None})
+                    argument_actions[key].required = False
                     continue
-                # Empty saved lists cannot be emitted as CLI flags with nargs="+".
-                if f"{base}.{arg_name}" in list_fields and arg_value == []:
-                    parser.set_defaults(**{f"{base}.{arg_name}": []})
+                if key in list_fields and isinstance(arg_value, list) and not arg_value:
+                    # nargs='+' requires CLI items, but [] is a legitimate
+                    # saved list. Preserve it directly instead of emitting an
+                    # empty --list option or falling back to a nonempty default.
+                    parser.set_defaults(**{key: []})
+                    argument_actions[key].required = False
                     continue
-
                 cmd_args.append(f"--{base}.{arg_name}")
                 if f"{base}.{arg_name}" in list_fields and isinstance(arg_value, list):
                     # For list fields, extend the arguments with individual elements
@@ -1053,7 +1086,7 @@ def parse_args(rootclass: T) -> T:
 
     parse_result = defaultdict(dict)
     for key, value in vars(args).items():
-        if key in dict_fields:
+        if key in dict_fields and value is not None:
             if isinstance(value, str) and value.startswith("{"):
                 value = _convert_str_dict(json.loads(value))
             else:

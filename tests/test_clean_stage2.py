@@ -316,8 +316,14 @@ class PreprocessingRegressionTests(unittest.TestCase):
         self.assertNotIn("stage2_augmentation_config", first["data"])
         self.assertFalse(second["train"]["enable_resume"])
         self.assertNotEqual(first["train"]["output_dir"], second["train"]["output_dir"])
-        for key in ("freeze_vit", "freeze_vision_encoder", "train_expert_only", "global_batch_size", "micro_batch_size", "gradient_accumulation_steps"):
+        for key in ("freeze_vit", "freeze_vision_encoder", "train_expert_only", "global_batch_size", "micro_batch_size"):
             self.assertEqual(first["train"][key], second["train"][key])
+        # The current stage1 preset is single-GPU, while stage2 is four-GPU.
+        # Same global/micro batch implies different accumulation, not a bug.
+        for config, default_world_size in ((first, 1), (second, 4)):
+            train = config["train"]
+            self.assertEqual(train["global_batch_size"], train["micro_batch_size"] *
+                             default_world_size * train["gradient_accumulation_steps"])
         tree = ast.parse((ROOT / "tasks/vla/train_lingbotvla.py").read_text())
         main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
         self.assertTrue(all(isinstance(value, ast.Constant) and value.value is None for value in main.args.kw_defaults))
